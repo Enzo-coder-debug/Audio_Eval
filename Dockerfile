@@ -4,13 +4,13 @@
 # 流水线的 npm ci 无法正确处理 pnpm 专属特性，故提供自定义 Dockerfile。
 #
 # DevCloud 预处理器会：
-#   1) 把 `node:22-slim` 重写为内网镜像 baseimages/node:lts-slim
+#   1) 把 `node:20-slim` 重写为内网镜像 baseimages/node:lts-slim
 #   2) 在每个 node FROM 后自动注入 `npm config set registry npmmirror`
 # 因此这里不手动配置 npm/apt 镜像；pnpm 的镜像另行显式设置。
 # =============================================================================
 
 # ---------- 构建阶段 ----------
-FROM node:22-slim AS builder
+FROM node:20-slim AS builder
 WORKDIR /app
 
 # 启用 corepack 以使用项目指定的 pnpm 版本（package.json packageManager 字段）
@@ -29,7 +29,7 @@ COPY . .
 RUN pnpm run build
 
 # ---------- 运行阶段 ----------
-FROM node:22-slim AS runner
+FROM node:20-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=8080
