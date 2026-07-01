@@ -1,0 +1,15 @@
+#!/usr/bin/expect -f
+# 上传本地文件到部署机
+# 用法: expect remote-scp.exp <本地文件> <远程路径>
+set timeout 120
+set password "jizhi"
+set src [lindex $argv 0]
+set dst [lindex $argv 1]
+spawn scp -o StrictHostKeyChecking=no -P 80 $src jizhi@11.77.34.101:$dst
+expect {
+    "*password:*" {
+        send "$password\r"
+        exp_continue
+    }
+    eof
+}

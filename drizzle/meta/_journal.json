@@ -1,0 +1,48 @@
+{
+  "version": "7",
+  "dialect": "mysql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1779333460410,
+      "tag": "0000_easy_deathstrike",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1779333630932,
+      "tag": "0001_regular_omega_flight",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1779346156197,
+      "tag": "0002_overjoyed_vector",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "5",
+      "when": 1782807108443,
+      "tag": "0003_fantastic_dragon_man",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "5",
+      "when": 1782807962226,
+      "tag": "0004_sloppy_albert_cleary",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "5",
+      "when": 1782809446991,
+      "tag": "0005_busy_shaman",
+      "breakpoints": true
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+#!/usr/bin/expect -f
+# 通过跳板机建立到京东云 RDS 的 SSH 隧道(本地 13306 -> RDS:3306)
+set timeout 30
+set password "jizhi"
+spawn ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -N -L 13306:mysql-cn-north-1-c58dc9db2e7b4686.rds.jdcloud.com:3306 -p 80 jizhi@11.77.34.101
+expect {
+    "*password:*" {
+        send "$password\r"
+        exp_continue
+    }
+    "*Permission denied*" {
+        puts "AUTH_FAILED"
+        exit 1
+    }
+    timeout {
+        puts "TUNNEL_TIMEOUT_OR_CONNECTED"
+    }
+}
+# 隧道建立后保持前台运行
+interact

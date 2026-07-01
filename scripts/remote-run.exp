@@ -1,0 +1,18 @@
+#!/usr/bin/expect -f
+# 在部署机(跳板机 11.77.34.101)上执行一条远程命令并回显输出
+# 用法: expect remote-run.exp "远程要执行的命令"
+set timeout 60
+set password "jizhi"
+set cmd [lindex $argv 0]
+spawn ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 -p 80 jizhi@11.77.34.101 $cmd
+expect {
+    "*password:*" {
+        send "$password\r"
+        exp_continue
+    }
+    "*Permission denied*" {
+        puts "AUTH_FAILED"
+        exit 1
+    }
+    eof
+}
