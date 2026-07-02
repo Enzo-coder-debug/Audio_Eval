@@ -66,7 +66,37 @@ async function startServer() {
   }
 
   server.listen(port, "0.0.0.0", () => {
-    console.log(`Server running on http://0.0.0.0:${port}/`);
+    // 启动诊断日志：部署后可在容器/WebShell 日志中快速定位配置问题
+    console.log("========== [Startup] audio_evaluation_platform ==========");
+    console.log(`[Startup] time          : ${new Date().toISOString()}`);
+    console.log(`[Startup] node          : ${process.version}`);
+    console.log(`[Startup] NODE_ENV      : ${process.env.NODE_ENV || "(unset)"}`);
+    console.log(`[Startup] listening     : http://0.0.0.0:${port}/`);
+    console.log(`[Startup] PORT(env)     : ${process.env.PORT || "(unset)"}`);
+    console.log(
+      `[Startup] DATABASE_URL  : ${process.env.DATABASE_URL ? "set" : "MISSING"}`
+    );
+    console.log(
+      `[Startup] JWT_SECRET    : ${process.env.JWT_SECRET ? "set" : "MISSING"}`
+    );
+    console.log(
+      `[Startup] ADMIN_USERNAME: ${process.env.ADMIN_USERNAME ? "set" : "MISSING"}`
+    );
+    console.log(
+      `[Startup] OSS_BUCKET    : ${process.env.OSS_BUCKET || "(unset)"}`
+    );
+    console.log("=========================================================");
+  });
+
+  // 全局异常兜底日志，避免进程静默退出难以排查
+  server.on("error", err => {
+    console.error("[Server] listen error:", err);
+  });
+  process.on("uncaughtException", err => {
+    console.error("[Process] uncaughtException:", err);
+  });
+  process.on("unhandledRejection", reason => {
+    console.error("[Process] unhandledRejection:", reason);
   });
 }
 
