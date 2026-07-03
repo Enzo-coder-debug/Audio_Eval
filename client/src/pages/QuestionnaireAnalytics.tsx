@@ -1,21 +1,37 @@
-import { useParams } from "wouter";
+import { useParams, useLocation } from "wouter";
 import { trpc } from "@/lib/trpc";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from "recharts";
-import { Loader2 } from "lucide-react";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, Cell } from "recharts";
+import { ArrowLeft, Loader2, TrendingUp } from "lucide-react";
 
-const COLORS = ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6"];
+// 置信度徽标:根据显著性与置信度着色
+function ConfidenceBadge({ significant, confidence }: { significant: boolean; confidence: number }) {
+  const pct = (confidence * 100).toFixed(1);
+  if (significant) {
+    return (
+      <span className="px-2 py-1 rounded text-xs font-medium bg-green-100 text-green-700">
+        显著（置信度 {pct}%）
+      </span>
+    );
+  }
+  return (
+    <span className="px-2 py-1 rounded text-xs font-medium bg-slate-100 text-slate-600">
+      不显著（置信度 {pct}%）
+    </span>
+  );
+}
 
 export default function QuestionnaireAnalytics() {
   const { id } = useParams();
+  const [, setLocation] = useLocation();
   const questionnaireId = parseInt(id || "0");
 
-  const { data: responsesData, isLoading } = trpc.response.listQuestionnaire.useQuery(
+  const { data, isLoading } = trpc.stats.aggregate.useQuery(
     { questionnaireId },
     { enabled: !!questionnaireId }
   );
-  const responses = responsesData?.responses;
 
   if (isLoading) {
     return (
@@ -25,203 +41,133 @@ export default function QuestionnaireAnalytics() {
     );
   }
 
-  if (!responses || responses.length === 0) {
+  const comparisons = data?.comparisons || [];
+
+  if (comparisons.length === 0) {
     return (
       <div className="min-h-screen bg-slate-50 p-8">
-        <Card>
-          <CardContent className="pt-12 text-center">
-            <p className="text-slate-600">暂无答题数据</p>
-          </CardContent>
-        </Card>
+        <div className="max-w-5xl mx-auto space-y-4">
+          <Button variant="ghost" size="sm" onClick={() => setLocation(`/admin/questionnaire/${questionnaireId}`)}>
+            <ArrowLeft className="w-4 h-4 mr-2" />
+            返回问卷
+          </Button>
+          <Card>
+            <CardContent className="pt-12 text-center">
+              <p className="text-slate-600">暂无可分析的盲测数据（需要有人完成答卷后才能生成对比结论）</p>
+            </CardContent>
+          </Card>
+        </div>
       </div>
     );
   }
 
-  // Calculate score distribution
-  const scoreDistribution: Record<string, number> = {
-    "0-20": 0,
-    "21-40": 0,
-    "41-60": 0,
-    "61-80": 0,
-    "81-100": 0,
-  };
-
-  responses.forEach((r) => {
-    if (r.totalScore !== null) {
-      const score = Number(r.totalScore);
-      if (score <= 20) scoreDistribution["0-20"]++;
-      else if (score <= 40) scoreDistribution["21-40"]++;
-      else if (score <= 60) scoreDistribution["41-60"]++;
-      else if (score <= 80) scoreDistribution["61-80"]++;
-      else scoreDistribution["81-100"]++;
-    }
-  });
-
-  const scoreDistributionData = Object.entries(scoreDistribution).map(([range, count]) => ({
-    range,
-    count,
+  // GSB 图表数据:每个"维度 - 模型对比"一条,gsbScore>0 表示 modelA 更优
+  const chartData = comparisons.map((c) => ({
+    label: `${c.dimensionName}｜${c.modelA} vs ${c.modelB}`,
+    gsb: Number((c.gsbScore * 100).toFixed(1)),
+    winner: c.winner,
+    significant: c.significant,
   }));
-
-  // Calculate statistics
-  const gradedResponses = responses.filter((r) => r.status === "graded");
-  const scores = gradedResponses
-    .map((r) => (r.totalScore !== null ? Number(r.totalScore) : 0))
-    .filter((s) => s > 0);
-
-  const avgScore = scores.length > 0 ? (scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(2) : "N/A";
-  const maxScore = scores.length > 0 ? Math.max(...scores).toFixed(2) : "N/A";
-  const minScore = scores.length > 0 ? Math.min(...scores).toFixed(2) : "N/A";
-
-  // Collect subjective answers
-  const subjectiveAnswers: string[] = [];
-  responses.forEach((r) => {
-    // In a real app, you'd fetch the answers separately
-    // For now, we'll just show the count
-  });
 
   return (
     <div className="min-h-screen bg-slate-50 p-8">
       <div className="max-w-6xl mx-auto space-y-6">
-        <div>
-          <h1 className="text-3xl font-bold text-slate-900">问卷分析报告</h1>
-          <p className="text-slate-600 mt-2">共有 {responses.length} 份答卷</p>
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-3xl font-bold text-slate-900">盲测聚合分析报告</h1>
+            <p className="text-slate-600 mt-2">
+              共 {data?.totalResponses || 0} 份答卷、{data?.totalJudgments || 0} 次两两对比判断
+            </p>
+          </div>
+          <Button variant="ghost" size="sm" onClick={() => setLocation(`/admin/questionnaire/${questionnaireId}`)}>
+            <ArrowLeft className="w-4 h-4 mr-2" />
+            返回问卷
+          </Button>
         </div>
 
-        {/* Statistics Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium text-slate-600">总答卷数</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold">{responses.length}</div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium text-slate-600">已评分</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold">{gradedResponses.length}</div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium text-slate-600">平均分</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold">{avgScore}</div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium text-slate-600">完成率</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold">
-                {((gradedResponses.length / responses.length) * 100).toFixed(0)}%
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* Charts */}
-        <Tabs defaultValue="distribution" className="space-y-4">
-          <TabsList>
-            <TabsTrigger value="distribution">得分分布</TabsTrigger>
-            <TabsTrigger value="details">答卷详情</TabsTrigger>
-          </TabsList>
-
-          <TabsContent value="distribution">
-            <Card>
-              <CardHeader>
-                <CardTitle>得分分布统计</CardTitle>
-                <CardDescription>显示各分数段的答卷数量</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <ResponsiveContainer width="100%" height={300}>
-                  <BarChart data={scoreDistributionData}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="range" />
-                    <YAxis />
-                    <Tooltip />
-                    <Bar dataKey="count" fill="#3b82f6" />
-                  </BarChart>
-                </ResponsiveContainer>
-              </CardContent>
-            </Card>
-          </TabsContent>
-
-          <TabsContent value="details">
-            <Card>
-              <CardHeader>
-                <CardTitle>答卷详情</CardTitle>
-                <CardDescription>所有答卷的详细信息</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b">
-                        <th className="text-left py-2 px-4">访客名称</th>
-                        <th className="text-left py-2 px-4">访客 IP</th>
-                        <th className="text-left py-2 px-4">得分</th>
-                        <th className="text-left py-2 px-4">状态</th>
-                        <th className="text-left py-2 px-4">提交时间</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {responses.map((r) => (
-                        <tr key={r.id} className="border-b hover:bg-slate-50">
-                          <td className="py-2 px-4">{r.visitorName || "匿名"}</td>
-                          <td className="py-2 px-4 font-mono text-xs">{r.visitorIp}</td>
-                          <td className="py-2 px-4 font-semibold">
-                            {r.totalScore !== null ? Number(r.totalScore).toFixed(2) : "-"}
-                          </td>
-                          <td className="py-2 px-4">
-                            <span className={`px-2 py-1 rounded text-xs font-medium ${
-                              r.status === "graded"
-                                ? "bg-green-100 text-green-700"
-                                : r.status === "submitted"
-                                ? "bg-blue-100 text-blue-700"
-                                : "bg-slate-100 text-slate-700"
-                            }`}>
-                              {r.status === "graded" ? "已评分" : r.status === "submitted" ? "待评分" : "进行中"}
-                            </span>
-                          </td>
-                          <td className="py-2 px-4 text-xs text-slate-600">
-                            {r.submittedAt ? new Date(r.submittedAt).toLocaleString("zh-CN") : "-"}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </CardContent>
-            </Card>
-          </TabsContent>
-        </Tabs>
-
-        {/* Summary Statistics */}
+        {/* GSB 净胜分图 */}
         <Card>
           <CardHeader>
-            <CardTitle>统计摘要</CardTitle>
+            <CardTitle className="flex items-center gap-2">
+              <TrendingUp className="w-5 h-5" />
+              GSB 净胜分（(胜-负)/总，正值表示前者更优）
+            </CardTitle>
+            <CardDescription>按 维度 × 模型对比 展示，绿色为统计显著的对比</CardDescription>
           </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid grid-cols-3 gap-4">
-              <div>
-                <p className="text-sm text-slate-600">最高分</p>
-                <p className="text-2xl font-bold text-green-600">{maxScore}</p>
-              </div>
-              <div>
-                <p className="text-sm text-slate-600">最低分</p>
-                <p className="text-2xl font-bold text-red-600">{minScore}</p>
-              </div>
-              <div>
-                <p className="text-sm text-slate-600">平均分</p>
-                <p className="text-2xl font-bold text-blue-600">{avgScore}</p>
-              </div>
-            </div>
+          <CardContent>
+            <ResponsiveContainer width="100%" height={Math.max(240, chartData.length * 48)}>
+              <BarChart data={chartData} layout="vertical" margin={{ left: 40, right: 40 }}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis type="number" domain={[-100, 100]} unit="%" />
+                <YAxis type="category" dataKey="label" width={220} tick={{ fontSize: 12 }} />
+                <Tooltip formatter={(v: any) => [`${v}%`, "GSB 净胜分"]} />
+                <ReferenceLine x={0} stroke="#94a3b8" />
+                <Bar dataKey="gsb">
+                  {chartData.map((entry, index) => (
+                    <Cell key={index} fill={entry.significant ? "#10b981" : "#94a3b8"} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </CardContent>
+        </Card>
+
+        {/* 详细统计表 */}
+        <Card>
+          <CardHeader>
+            <CardTitle>详细对比统计</CardTitle>
+            <CardDescription>
+              胜率与置信度基于双侧二项检验（H0：两模型无差异），Wilson 区间为前者胜出比例的 95% 置信区间
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>维度</TableHead>
+                  <TableHead>模型对比</TableHead>
+                  <TableHead className="text-center">胜 / 平 / 负</TableHead>
+                  <TableHead className="text-center">胜率</TableHead>
+                  <TableHead className="text-center">GSB</TableHead>
+                  <TableHead className="text-center">95% 区间</TableHead>
+                  <TableHead>结论</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {comparisons.map((c, i) => (
+                  <TableRow key={i}>
+                    <TableCell className="font-medium">{c.dimensionName}</TableCell>
+                    <TableCell className="text-sm">
+                      <span className="font-medium">{c.modelA}</span>
+                      <span className="text-slate-400"> vs </span>
+                      <span className="font-medium">{c.modelB}</span>
+                    </TableCell>
+                    <TableCell className="text-center text-sm">
+                      {c.aWins} / {c.ties} / {c.bWins}
+                    </TableCell>
+                    <TableCell className="text-center text-sm">
+                      {(c.aWinRate * 100).toFixed(1)}%
+                    </TableCell>
+                    <TableCell className="text-center text-sm font-medium">
+                      {c.gsbScore > 0 ? "+" : ""}{(c.gsbScore * 100).toFixed(1)}%
+                    </TableCell>
+                    <TableCell className="text-center text-xs text-slate-500">
+                      [{(c.wilsonLower * 100).toFixed(0)}%, {(c.wilsonUpper * 100).toFixed(0)}%]
+                    </TableCell>
+                    <TableCell>
+                      <div className="space-y-1">
+                        {c.winner ? (
+                          <div className="text-sm font-medium text-green-700">{c.winner} 更优</div>
+                        ) : (
+                          <div className="text-sm text-slate-500">无显著差异</div>
+                        )}
+                        <ConfidenceBadge significant={c.significant} confidence={c.confidenceLevel} />
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
           </CardContent>
         </Card>
       </div>

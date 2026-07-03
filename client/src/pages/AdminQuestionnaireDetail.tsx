@@ -8,9 +8,23 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { ArrowLeft, Plus, Edit2, Trash2, Music, Send, Copy, Globe } from "lucide-react";
+import { ArrowLeft, Plus, Edit2, Trash2, Music, Send, Copy, Globe, BarChart3 } from "lucide-react";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
+
+// 读取音频文件为上传所需格式(与 AdminDashboard 一致)。
+async function readAudioForUpload(file: File) {
+  const fileData = await file.arrayBuffer();
+  let mimeType: "audio/mpeg" | "audio/wav" | "audio/mp4" = "audio/mpeg";
+  if (file.type === "audio/wav") mimeType = "audio/wav";
+  else if (file.type === "audio/mp4" || file.name.endsWith(".m4a")) mimeType = "audio/mp4";
+  return {
+    fileName: file.name,
+    fileData: new Uint8Array(fileData),
+    mimeType,
+    fileSizeBytes: file.size,
+  };
+}
 
 export default function AdminQuestionnaireDetail() {
   const { id } = useParams<{ id: string }>();
@@ -24,6 +38,11 @@ export default function AdminQuestionnaireDetail() {
   const [dimensionWeight, setDimensionWeight] = useState("1");
   const [dimensionMaxScore, setDimensionMaxScore] = useState("10");
   const [expandedResponseId, setExpandedResponseId] = useState<number | null>(null);
+
+  // 音频管理:新增音频的文件与模型名
+  const [newAudioFile, setNewAudioFile] = useState<File | null>(null);
+  const [newAudioModelName, setNewAudioModelName] = useState("");
+  const audioInputRef = React.useRef<HTMLInputElement>(null);
 
   // Fetch questionnaire details
   const { data: questionnaire, isLoading: isLoadingQuestionnaire, refetch: refetchQuestionnaire } = 
@@ -56,6 +75,35 @@ export default function AdminQuestionnaireDetail() {
   // Fetch evaluation dimensions
   const { data: dimensions, refetch: refetchDimensions } = 
     trpc.dimension.list.useQuery({ questionnaireId });
+
+  // 音频管理:该问卷当前音频列表 + 是否已有作答(用于风险提示)
+  const { data: audioData, refetch: refetchAudios } =
+    trpc.audio.listByQuestionnaire.useQuery({ questionnaireId });
+  const questionnaireAudios = audioData?.audios || [];
+  const audioResponseCount = audioData?.responseCount || 0;
+
+  const { mutate: addAudio, isPending: isAddingAudio } =
+    trpc.audio.addToQuestionnaire.useMutation({
+      onSuccess: () => {
+        toast.success("音频已添加，盲测配对已重建");
+        setNewAudioFile(null);
+        setNewAudioModelName("");
+        if (audioInputRef.current) audioInputRef.current.value = "";
+        refetchAudios();
+        refetchResponses();
+      },
+      onError: (error) => toast.error(error.message || "添加失败"),
+    });
+
+  const { mutate: removeAudio } =
+    trpc.audio.removeFromQuestionnaire.useMutation({
+      onSuccess: () => {
+        toast.success("音频已移除，盲测配对已重建");
+        refetchAudios();
+        refetchResponses();
+      },
+      onError: (error) => toast.error(error.message || "移除失败"),
+    });
 
   // Fetch responses with auto-refresh
   const { data: responsesData, refetch: refetchResponses } = 
@@ -157,6 +205,39 @@ export default function AdminQuestionnaireDetail() {
   const handleDeleteDimension = (dimensionId: number) => {
     if (confirm("确定要删除这个维度吗？")) {
       deleteDimension({ id: dimensionId });
+    }
+  };
+
+  // 新增音频:读取文件 -> 调用后端(会重建盲测配对)
+  const handleAddAudio = async () => {
+    if (!newAudioFile) {
+      toast.error("请选择音频文件");
+      return;
+    }
+    if (!newAudioModelName.trim()) {
+      toast.error("请填写模型名称");
+      return;
+    }
+    if (audioResponseCount > 0 && !confirm("该问卷已有答卷，修改音频会清空已有答卷数据，确定继续？")) {
+      return;
+    }
+    try {
+      const base = await readAudioForUpload(newAudioFile);
+      addAudio({
+        questionnaireId,
+        audios: [{ ...base, modelName: newAudioModelName.trim() }],
+      });
+    } catch (e) {
+      toast.error("文件读取失败");
+    }
+  };
+
+  const handleRemoveAudio = (audioFileId: number) => {
+    const msg = audioResponseCount > 0
+      ? "该问卷已有答卷，移除音频会清空已有答卷数据，确定移除？"
+      : "确定移除这个音频吗？将重建盲测配对。";
+    if (confirm(msg)) {
+      removeAudio({ questionnaireId, audioFileId });
     }
   };
 
@@ -286,6 +367,14 @@ export default function AdminQuestionnaireDetail() {
                 {isPublishing ? "发布中..." : "重新发布"}
               </Button>
             )}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setLocation(`/admin/questionnaire/${questionnaireId}/analytics`)}
+            >
+              <BarChart3 className="w-4 h-4 mr-2" />
+              查看分析
+            </Button>
             <span className={`px-3 py-1 rounded-full text-xs font-medium ${
               questionnaire.status === "published"
                 ? "bg-green-100 text-green-700"
@@ -302,8 +391,9 @@ export default function AdminQuestionnaireDetail() {
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <Tabs defaultValue="dimensions" className="space-y-6">
-          <TabsList className="grid w-full max-w-md grid-cols-3">
+          <TabsList className="grid w-full max-w-lg grid-cols-4">
             <TabsTrigger value="dimensions">测评维度</TabsTrigger>
+            <TabsTrigger value="audios">音频管理</TabsTrigger>
             <TabsTrigger value="progress">填写进展</TabsTrigger>
             <TabsTrigger value="responses">答卷详情</TabsTrigger>
           </TabsList>
@@ -463,6 +553,114 @@ export default function AdminQuestionnaireDetail() {
                   </Card>
                 ))}
               </div>
+            )}
+          </TabsContent>
+
+          {/* Audio Management Tab */}
+          <TabsContent value="audios" className="space-y-6">
+            <div>
+              <h2 className="text-2xl font-bold text-slate-900">音频管理</h2>
+              <p className="text-slate-600 mt-1">
+                管理本问卷的盲测音频，增删音频后会自动重建盲测配对。
+                {audioResponseCount > 0 && (
+                  <span className="text-red-600">（该问卷已有 {audioResponseCount} 份答卷，修改音频会清空已有答卷）</span>
+                )}
+              </p>
+            </div>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-lg">新增音频</CardTitle>
+                <CardDescription>选择音频文件并填写对应的模型名称</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="space-y-2">
+                    <Label>音频文件</Label>
+                    <Input
+                      ref={audioInputRef}
+                      type="file"
+                      accept="audio/*,.m4a"
+                      onChange={(e) => setNewAudioFile(e.target.files?.[0] || null)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>模型名称</Label>
+                    <Input
+                      placeholder="如：模型A"
+                      value={newAudioModelName}
+                      onChange={(e) => setNewAudioModelName(e.target.value)}
+                    />
+                  </div>
+                  <div className="flex items-end">
+                    <Button
+                      className="bg-blue-600 hover:bg-blue-700"
+                      onClick={handleAddAudio}
+                      disabled={isAddingAudio}
+                    >
+                      <Plus className="w-4 h-4 mr-2" />
+                      {isAddingAudio ? "上传中..." : "添加音频"}
+                    </Button>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            {questionnaireAudios.length === 0 ? (
+              <Card>
+                <CardContent className="pt-12 text-center">
+                  <p className="text-slate-600">该问卷暂无音频，请添加至少两个不同模型的音频以生成盲测配对</p>
+                </CardContent>
+              </Card>
+            ) : (
+              <Card>
+                <CardContent className="pt-6">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>文件名</TableHead>
+                        <TableHead>模型名称</TableHead>
+                        <TableHead>试听</TableHead>
+                        <TableHead>操作</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {questionnaireAudios.map((audio: any) => (
+                        <TableRow key={audio.id}>
+                          <TableCell>
+                            <span className="flex items-center gap-2">
+                              <Music className="w-4 h-4 text-slate-400" />
+                              {audio.fileName}
+                            </span>
+                          </TableCell>
+                          <TableCell className="font-medium">{audio.modelName || "-"}</TableCell>
+                          <TableCell>
+                            {audio.fileUrl ? (
+                              <audio controls src={audio.fileUrl} className="h-8" />
+                            ) : (
+                              "-"
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                            className="text-red-600 hover:text-red-700 hover:bg-red-50"
+                              onClick={() => handleRemoveAudio(audio.id)}
+                            >
+                              <Trash2 className="w-4 h-4 mr-1" />
+                              移除
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                  <p className="text-xs text-slate-500 mt-3">
+                    提示：更换音频 = 移除旧音频 + 新增新音频。盲测按模型两两配对，需至少两个不同模型。
+                  </p>
+                </CardContent>
+              </Card>
             )}
           </TabsContent>
 

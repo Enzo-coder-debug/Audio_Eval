@@ -56,6 +56,132 @@ function parseScoringStandardToDimensions(
   return dimensions;
 }
 
+// 根据一组音频(含 modelName)生成盲测配对数据(左右已随机、整体已打乱顺序)。
+// 规则:按 modelName 分组保持顺序 -> 每两个模型按相同序号一一配对 ->
+// 随机左右位置消除位置偏见 -> Fisher-Yates 打乱展示顺序。
+// upload 首次上传与后续音频编辑(增删换)重建配对时共用此逻辑,保证行为一致。
+export function buildBlindTestPairs(
+  questionnaireId: number,
+  audios: { audioFileId: number; modelName: string }[]
+): { questionnaireId: number; leftAudioFileId: number; rightAudioFileId: number; pairIndex: number }[] {
+  const groups = new Map<string, { audioFileId: number }[]>();
+  for (const a of audios) {
+    if (!groups.has(a.modelName)) groups.set(a.modelName, []);
+    groups.get(a.modelName)!.push({ audioFileId: a.audioFileId });
+  }
+  const modelNames = Array.from(groups.keys());
+
+  const rawPairs: { leftId: number; rightId: number }[] = [];
+  for (let m = 0; m < modelNames.length; m++) {
+    for (let n = m + 1; n < modelNames.length; n++) {
+      const listA = groups.get(modelNames[m])!;
+      const listB = groups.get(modelNames[n])!;
+      const count = Math.min(listA.length, listB.length);
+      for (let k = 0; k < count; k++) {
+        const swapSides = Math.random() > 0.5;
+        rawPairs.push({
+          leftId: swapSides ? listB[k].audioFileId : listA[k].audioFileId,
+          rightId: swapSides ? listA[k].audioFileId : listB[k].audioFileId,
+        });
+      }
+    }
+  }
+
+  for (let i = rawPairs.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [rawPairs[i], rawPairs[j]] = [rawPairs[j], rawPairs[i]];
+  }
+
+  return rawPairs.map((pair, idx) => ({
+    questionnaireId,
+    leftAudioFileId: pair.leftId,
+    rightAudioFileId: pair.rightId,
+    pairIndex: idx,
+  }));
+}
+
+// 音频编辑(增/删)后重建某问卷的盲测配对:
+// 取当前问卷音频 -> 删旧配对 -> 按新音频集重新生成配对。
+// 由于旧配对与旧答案(answers.blindTestPairId)绑定,音频变化会让旧作答失去意义,
+// 故先清空该问卷的旧作答与统计,避免答案指向已删除的配对造成数据错位。
+// 音频编辑(增/删)后重建某问卷的盲测配对:
+// 取当前问卷音频 -> 删旧配对 -> 按新音频集重新生成配对。
+// 由于旧配对与旧答案(answers.blindTestPairId)绑定,音频变化会让旧作答失去意义,
+// 故先清空该问卷的旧作答与统计,避免答案指向已删除的配对造成数据错位。
+// extraAudios: 新增但尚未进入配对表的音频(addToQuestionnaire 时传入)。
+async function rebuildQuestionnairePairs(
+  questionnaireId: number,
+  extraAudios: { audioFileId: number; modelName: string }[] = []
+) {
+  // 先在删除旧配对之前取出当前音频集(getAudioFilesByQuestionnaire 依赖配对反查)。
+  const existing = await db.getAudioFilesByQuestionnaire(questionnaireId);
+
+  await db.deleteResponsesByQuestionnaire(questionnaireId);
+  await db.deleteBlindTestPairsByQuestionnaire(questionnaireId);
+
+  const all = [
+    ...existing.map(a => ({ audioFileId: a.id, modelName: a.modelName || "未命名模型" })),
+    ...extraAudios,
+  ];
+  // 去重(以 audioFileId 为准)
+  const seen = new Set<number>();
+  const audios = all.filter(a => {
+    if (seen.has(a.audioFileId)) return false;
+    seen.add(a.audioFileId);
+    return true;
+  });
+
+  if (audios.length < 2) return; // 不足两个音频无法配对,清空后留空即可
+
+  const pairs = buildBlindTestPairs(questionnaireId, audios);
+  if (pairs.length > 0) await db.createBlindTestPairs(pairs);
+}
+
+// ---- 盲测统计学工具函数 ----
+
+// Wilson score 置信区间:比正态近似更稳健,小样本也合理。
+// successes 成功次数, n 总试验数, z 为置信水平对应分位(1.96≈95%)。返回 { lower, upper }。
+function wilsonInterval(successes: number, n: number, z: number): { lower: number; upper: number } {
+  if (n === 0) return { lower: 0, upper: 0 };
+  const p = successes / n;
+  const z2 = z * z;
+  const denom = 1 + z2 / n;
+  const center = (p + z2 / (2 * n)) / denom;
+  const margin = (z * Math.sqrt((p * (1 - p) + z2 / (4 * n)) / n)) / denom;
+  return { lower: Math.max(0, center - margin), upper: Math.min(1, center + margin) };
+}
+
+// 对数阶乘,避免大数溢出。
+function logFactorial(n: number): number {
+  let s = 0;
+  for (let i = 2; i <= n; i++) s += Math.log(i);
+  return s;
+}
+
+// 二项分布 PMF:C(n,k) * p^k * (1-p)^(n-k)。
+function binomPmf(k: number, n: number, p: number): number {
+  if (k < 0 || k > n) return 0;
+  if (p <= 0) return k === 0 ? 1 : 0;
+  if (p >= 1) return k === n ? 1 : 0;
+  const logC = logFactorial(n) - logFactorial(k) - logFactorial(n - k);
+  return Math.exp(logC + k * Math.log(p) + (n - k) * Math.log(1 - p));
+}
+
+// 双侧二项检验(原假设 p=p0,通常 0.5):返回 p 值,越小说明差异越显著。
+// 采用"概率不超过观测点的所有结果之和"的双侧定义。
+function twoSidedBinomialTest(successes: number, n: number, p0: number): number {
+  if (n === 0) return 1;
+  const observed = binomPmf(successes, n, p0);
+  const eps = 1e-9;
+  let pValue = 0;
+  for (let k = 0; k <= n; k++) {
+    if (binomPmf(k, n, p0) <= observed + eps) {
+      pValue += binomPmf(k, n, p0);
+    }
+  }
+  return Math.min(1, pValue);
+}
+
 export const appRouter = router({
   system: systemRouter,
   auth: router({
@@ -143,45 +269,13 @@ export const appRouter = router({
 
           const questionnaireId = getInsertId(qResult);
 
-          // 按模型分组(保持上传顺序),组内顺序即为该模型音频的序号 1、2、3...
-          // 然后对每两个模型,按相同序号位置一一配对(模型A的第k个 vs 模型B的第k个),
-          // 而不是做所有不同模型音频的笛卡尔积,避免产生过多无意义的交叉对比。
-          const groups = new Map<string, { audioFileId: number }[]>();
-          for (const a of uploadedAudios) {
-            if (!groups.has(a.modelName)) groups.set(a.modelName, []);
-            groups.get(a.modelName)!.push({ audioFileId: a.audioFileId });
-          }
-          const modelNames = Array.from(groups.keys());
-
-          const rawPairs: { leftId: number; rightId: number }[] = [];
-          for (let m = 0; m < modelNames.length; m++) {
-            for (let n = m + 1; n < modelNames.length; n++) {
-              const listA = groups.get(modelNames[m])!;
-              const listB = groups.get(modelNames[n])!;
-              const count = Math.min(listA.length, listB.length);
-              for (let k = 0; k < count; k++) {
-                // 随机左右位置以消除位置偏见
-                const swapSides = Math.random() > 0.5;
-                rawPairs.push({
-                  leftId: swapSides ? listB[k].audioFileId : listA[k].audioFileId,
-                  rightId: swapSides ? listA[k].audioFileId : listB[k].audioFileId,
-                });
-              }
-            }
-          }
-
-          // Fisher-Yates shuffle for random display order
-          for (let i = rawPairs.length - 1; i > 0; i--) {
-            const j = Math.floor(Math.random() * (i + 1));
-            [rawPairs[i], rawPairs[j]] = [rawPairs[j], rawPairs[i]];
-          }
-
-          const blindTestPairsData = rawPairs.map((pair, idx) => ({
+          // 生成盲测配对(抽取为 buildBlindTestPairs helper,与音频编辑重建配对共用):
+          // 按 modelName 分组保持顺序 -> 每两个模型按相同序号一一配对 ->
+          // 随机左右位置消除位置偏见 -> 打乱展示顺序。
+          const blindTestPairsData = buildBlindTestPairs(
             questionnaireId,
-            leftAudioFileId: pair.leftId,
-            rightAudioFileId: pair.rightId,
-            pairIndex: idx,
-          }));
+            uploadedAudios.map(a => ({ audioFileId: a.audioFileId, modelName: a.modelName }))
+          );
           await db.createBlindTestPairs(blindTestPairsData);
 
           // 根据评分标准文本自动解析并写入评分维度,管理员后续可在详情页增删。
@@ -236,6 +330,90 @@ export const appRouter = router({
       .input(z.object({ id: z.number() }))
       .query(async ({ input }) => {
         return db.getAudioFileById(input.id);
+      }),
+
+    /**
+     * 列出某问卷当前用到的音频(从盲测配对反查去重),供详情页音频管理使用。
+     * 附带该问卷是否已有作答记录,前端据此提示"改音频将清空已有答卷"。
+     */
+    listByQuestionnaire: adminProcedure
+      .input(z.object({ questionnaireId: z.number() }))
+      .query(async ({ input, ctx }) => {
+        const questionnaire = await db.getQuestionnaireById(input.questionnaireId);
+        if (!questionnaire || questionnaire.creatorId !== ctx.user.id) {
+          throw new TRPCError({ code: "FORBIDDEN" });
+        }
+        const audios = await db.getAudioFilesByQuestionnaire(input.questionnaireId);
+        const responseCount = await db.countResponsesByQuestionnaire(input.questionnaireId);
+        return { audios, responseCount };
+      }),
+
+    /**
+     * 向已有问卷新增音频,并重建盲测配对。
+     * 若问卷已有作答记录,旧配对会��效,故一并清空旧作答(避免答案错位到不存在的配对)。
+     */
+    addToQuestionnaire: adminProcedure
+      .input(z.object({
+        questionnaireId: z.number(),
+        audios: z.array(z.object({
+          fileName: z.string(),
+          fileData: z.instanceof(Uint8Array),
+          mimeType: z.enum(["audio/mpeg", "audio/wav", "audio/mp4"]),
+          fileSizeBytes: z.number(),
+          modelName: z.string().min(1),
+        })).min(1),
+      }))
+      .mutation(async ({ input, ctx }) => {
+        const questionnaire = await db.getQuestionnaireById(input.questionnaireId);
+        if (!questionnaire || questionnaire.creatorId !== ctx.user.id) {
+          throw new TRPCError({ code: "FORBIDDEN" });
+        }
+
+        // 上传新音频并落库
+        const newAudios: { audioFileId: number; modelName: string }[] = [];
+        for (const audioInput of input.audios) {
+          const fileKey = `audio/${ctx.user.id}/${Date.now()}-${audioInput.fileName}`;
+          const { url: fileUrl } = await storagePut(fileKey, audioInput.fileData, audioInput.mimeType);
+          const result = await db.createAudioFile({
+            uploaderId: ctx.user.id,
+            fileName: audioInput.fileName,
+            fileKey,
+            fileUrl,
+            mimeType: audioInput.mimeType,
+            fileSizeBytes: audioInput.fileSizeBytes,
+            transcription: null,
+            modelName: audioInput.modelName,
+          });
+          const audioFileId = getInsertId(result);
+          newAudios.push({ audioFileId, modelName: audioInput.modelName });
+          void (async () => {
+            try {
+              const t = await transcribeAudio({ audioUrl: fileUrl });
+              if ("text" in t) await db.updateAudioFile(audioFileId, { transcription: t.text });
+            } catch (err) {
+              console.error(`Transcription failed for ${audioInput.fileName}:`, err);
+            }
+          })();
+        }
+
+       await rebuildQuestionnairePairs(input.questionnaireId, newAudios);
+        return { success: true };
+      }),
+
+    /**
+     * 从问卷中移除一个音频(删除音频记录),并重建盲测配对。
+     * 同样会清空旧作答以保证数据一致。
+     */
+    removeFromQuestionnaire: adminProcedure
+      .input(z.object({ questionnaireId: z.number(), audioFileId: z.number() }))
+      .mutation(async ({ input, ctx }) => {
+        const questionnaire = await db.getQuestionnaireById(input.questionnaireId);
+        if (!questionnaire || questionnaire.creatorId !== ctx.user.id) {
+          throw new TRPCError({ code: "FORBIDDEN" });
+        }
+        await db.deleteAudioFile(input.audioFileId);
+        await rebuildQuestionnairePairs(input.questionnaireId);
+        return { success: true };
       }),
   }),
 
@@ -820,6 +998,117 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
         }
 
         return db.getOrCreateStats(input.questionnaireId);
+      }),
+
+    /**
+     * 盲测聚合统计分析:把所有答卷的 blindTestChoice 按"模型对比 × 评分维度"聚合,
+     * 计算 win/tie/loss、胜率、GSB 分数,并用 Wilson 置信区间 + 双侧二项检验
+     * 给出差异显著性(置信度),用于自动化的模型优劣结论。
+     */
+    aggregate: adminProcedure
+      .input(z.object({ questionnaireId: z.number() }))
+      .query(async ({ input, ctx }) => {
+        const questionnaire = await db.getQuestionnaireById(input.questionnaireId);
+        if (!questionnaire || questionnaire.creatorId !== ctx.user.id) {
+          throw new TRPCError({ code: "FORBIDDEN" });
+        }
+
+        // 配对信息:pairId -> { left, right } 模型名
+        const pairs = await db.getBlindTestPairsByQuestionnaire(input.questionnaireId);
+        const pairMeta = new Map<number, { left: string; right: string }>();
+        for (const p of pairs) {
+          const leftAudio = await db.getAudioFileById(p.leftAudioFileId);
+          const rightAudio = await db.getAudioFileById(p.rightAudioFileId);
+          pairMeta.set(p.id, {
+            left: leftAudio?.modelName || "左侧模型",
+            right: rightAudio?.modelName || "右侧模型",
+          });
+        }
+
+        const dimensions = await db.getEvaluationDimensionsByQuestionnaire(input.questionnaireId);
+        const dimNameMap = new Map<number, string>(dimensions.map(d => [d.id, d.dimensionName]));
+
+        // 收集所有作答的答案
+        const responsesList = await db.getQuestionnaireResponses(input.questionnaireId);
+        const allAnswers: any[] = [];
+        for (const r of responsesList) {
+          const ans = await db.getAnswersByResponse(r.id);
+          allAnswers.push(...ans);
+        }
+
+        // 聚合键:`${dimensionId}|${modelA}__VS__${modelB}`(modelA/B 按字典序规范化,消除左右差异)
+        type Cell = { modelA: string; modelB: string; dimensionId: number; aWins: number; bWins: number; ties: number };
+        const cells = new Map<string, Cell>();
+
+        for (const a of allAnswers) {
+          if (!a.blindTestPairId || !a.blindTestChoice) continue;
+          const meta = pairMeta.get(a.blindTestPairId);
+          if (!meta) continue;
+          if (meta.left === meta.right) continue; // 同模型不比
+
+          // 规范化:让 modelA 始终是字典序较小者,把 left/right 结果映射到 A/B 视角
+          const [modelA, modelB] = meta.left < meta.right ? [meta.left, meta.right] : [meta.right, meta.left];
+          const leftIsA = meta.left === modelA;
+          const dimId = a.evaluationDimensionId ?? 0;
+          const key = `${dimId}|${modelA}__VS__${modelB}`;
+          if (!cells.has(key)) {
+            cells.set(key, { modelA, modelB, dimensionId: dimId, aWins: 0, bWins: 0, ties: 0 });
+          }
+          const cell = cells.get(key)!;
+          if (a.blindTestChoice === "same") {
+            cell.ties++;
+          } else {
+            const leftWon = a.blindTestChoice === "left_better";
+            const aWon = leftIsA ? leftWon : !leftWon;
+            if (aWon) cell.aWins++;
+            else cell.bWins++;
+          }
+        }
+
+        // 生成统计结果
+        const comparisons = Array.from(cells.values()).map(cell => {
+          const total = cell.aWins + cell.bWins + cell.ties;
+          const decisive = cell.aWins + cell.bWins; // 排除平局的有效对比数
+          const aWinRate = total > 0 ? cell.aWins / total : 0;
+          const bWinRate = total > 0 ? cell.bWins / total : 0;
+          const tieRate = total > 0 ? cell.ties / total : 0;
+          // GSB 分数:(win - loss) / total,范围 [-1,1],>0 表示 A 更优
+          const gsbScore = total > 0 ? (cell.aWins - cell.bWins) / total : 0;
+
+          // 置信度:仅看非平局的决定性对比,A 胜出比例的 Wilson 95% 区间 + 双侧二项检验
+          const wilson = wilsonInterval(cell.aWins, decisive, 1.96);
+          const pValue = twoSidedBinomialTest(cell.aWins, decisive, 0.5);
+          const significant = decisive > 0 && pValue < 0.05;
+          let winner: string | null = null;
+          if (significant) winner = cell.aWins > cell.bWins ? cell.modelA : cell.modelB;
+
+          return {
+            dimensionId: cell.dimensionId,
+            dimensionName: dimNameMap.get(cell.dimensionId) || (cell.dimensionId === 0 ? "整体" : `维度#${cell.dimensionId}`),
+            modelA: cell.modelA,
+            modelB: cell.modelB,
+            aWins: cell.aWins,
+            bWins: cell.bWins,
+            ties: cell.ties,
+            total,
+            aWinRate,
+            bWinRate,
+            tieRate,
+            gsbScore,
+            confidenceLevel: decisive > 0 ? 1 - pValue : 0, // 置信度 = 1 - p 值
+            pValue,
+            wilsonLower: wilson.lower,
+            wilsonUpper: wilson.upper,
+            significant,
+            winner,
+          };
+        });
+
+        return {
+          totalResponses: responsesList.length,
+          totalJudgments: allAnswers.filter(a => a.blindTestChoice).length,
+          comparisons,
+        };
       }),
   }),
 });

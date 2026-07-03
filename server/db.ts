@@ -1,4 +1,4 @@
-import { eq, and, desc, isNull, lte, gte } from "drizzle-orm";
+import { eq, and, desc, isNull, lte, gte, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import { 
   InsertUser, 
@@ -424,6 +424,71 @@ export async function deleteEvaluationDimension(id: number) {
   
   return db.delete(evaluationDimensions)
     .where(eq(evaluationDimensions.id, id));
+}
+
+/**
+ * 盲测音频编辑相关操作
+ * 说明:音频(audioFiles)与问卷(questionnaires)之间没有直接外键,
+ * 而是通过盲测配对(blindTestPairs)的 left/right 关联。
+ * 因此"某问卷用到的音频"需要从配对表反查并去重。
+ */
+
+// 取某问卷用到的全部音频(按 audioFileId 去重,保留稳定顺序)。
+export async function getAudioFilesByQuestionnaire(questionnaireId: number) {
+  const db = await getDb();
+  if (!db) return [] as AudioFile[];
+
+  const pairs = await db.select().from(blindTestPairs)
+    .where(eq(blindTestPairs.questionnaireId, questionnaireId))
+    .orderBy(blindTestPairs.pairIndex);
+
+  const ids: number[] = [];
+  for (const p of pairs) {
+    if (!ids.includes(p.leftAudioFileId)) ids.push(p.leftAudioFileId);
+    if (!ids.includes(p.rightAudioFileId)) ids.push(p.rightAudioFileId);
+  }
+  if (ids.length === 0) return [] as AudioFile[];
+
+  const rows = await db.select().from(audioFiles).where(inArray(audioFiles.id, ids));
+  // 按 ids 的出现顺序排序
+  const orderMap = new Map(ids.map((id, idx) => [id, idx]));
+  return rows.sort((a, b) => (orderMap.get(a.id)! - orderMap.get(b.id)!));
+}
+
+// 删除某问卷的全部盲测配对(重建配对前调用)。
+export async function deleteBlindTestPairsByQuestionnaire(questionnaireId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  return db.delete(blindTestPairs).where(eq(blindTestPairs.questionnaireId, questionnaireId));
+}
+
+// 删除单个音频记录(仅删记录,OSS 对象保留,避免误删共享文件)。
+export async function deleteAudioFile(id: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  return db.delete(audioFiles).where(eq(audioFiles.id, id));
+}
+
+// 统计某问卷是否已有作答记录(改音频前用于风险判断)。
+export async function countResponsesByQuestionnaire(questionnaireId: number) {
+  const db = await getDb();
+  if (!db) return 0;
+  const rows = await db.select({ id: responses.id }).from(responses)
+    .where(eq(responses.questionnaireId, questionnaireId));
+  return rows.length;
+}
+
+// 清空某问卷的所有作答与答案(改音频导致旧配对失效时,级联清理避免数据错位)。
+export async function deleteResponsesByQuestionnaire(questionnaireId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const respRows = await db.select({ id: responses.id }).from(responses)
+    .where(eq(responses.questionnaireId, questionnaireId));
+  for (const r of respRows) {
+    await db.delete(answers).where(eq(answers.responseId, r.id));
+  }
+  await db.delete(responses).where(eq(responses.questionnaireId, questionnaireId));
+  await db.delete(questionnaireStats).where(eq(questionnaireStats.questionnaireId, questionnaireId));
 }
 
 // 级联删除问卷及其所有关联数据,避免产生孤儿记录。
