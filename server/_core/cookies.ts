@@ -39,10 +39,15 @@ export function getSessionCookieOptions(
   //       ? hostname
   //       : undefined;
 
+  // 同站点登录(同域 audio-eval.jd.com 内跳转)用 lax 即可，无需跨站的 none。
+  // 关键：sameSite:"none" 时浏览器强制要求 secure:true，否则拒绝保存 cookie；
+  // 在 HTTP 明文访问(如 http://audio-eval.jd.com)下 secure 为 false，会导致
+  // 登录成功但 cookie 存不住 → auth.me 读不到登录态 → /admin/dashboard 404。
+  // 改为 lax 后，HTTP 下也能正常保存并回传 cookie。
   return {
     httpOnly: true,
     path: "/",
-    sameSite: "none",
+    sameSite: "lax",
     secure: isSecureRequest(req),
   };
 }
