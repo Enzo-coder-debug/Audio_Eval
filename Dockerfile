@@ -48,7 +48,15 @@ RUN chown admin:admin /home/admin/start.sh /home/admin/stop.sh /home/admin/start
   && chmod +x /home/admin/start.sh /home/admin/stop.sh /home/admin/start_container.sh
 
 # 下载 tini，防止僵尸进程（JDOS 提供的内网地址）
-ADD --chmod=0755 http://s3-internal.cn-north-1.jdcloud-oss.com/jdos-build-public/tools/tini/tini-amd64-v0.19.0 /home/admin/tini
+ADD http://s3-internal.cn-north-1.jdcloud-oss.com/jdos-build-public/tools/tini/tini-amd64-v0.19.0 /home/admin/tini
+
+# tini 显式赋可执行权限（ADD --chmod 在部分构建器不生效，故显式 chmod）
+RUN chmod +x /home/admin/tini && chown admin:admin /home/admin/tini
+
+# 预建平台所需目录（避免启动检查报 /export/Data No such file or directory）
+# 注意：/export 会被平台挂载，运行时目录以挂载为准；此处仅确保路径存在
+RUN mkdir -p /export/Data /export/log/audio-eval \
+  && chown -R admin:admin /export/Data /export/log/audio-eval
 
 # 应用监听 8080（server/_core/index.ts 生产分支绑定 0.0.0.0:8080）
 EXPOSE 8080
