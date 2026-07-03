@@ -39,10 +39,12 @@ export default function AdminQuestionnaireDetail() {
   const [dimensionMaxScore, setDimensionMaxScore] = useState("10");
   const [expandedResponseId, setExpandedResponseId] = useState<number | null>(null);
 
-  // 音频管理:新增音频的文件与模型名
-  const [newAudioFile, setNewAudioFile] = useState<File | null>(null);
-  const [newAudioModelName, setNewAudioModelName] = useState("");
+  // 音频管理:待新增音频列表(支持一次选多个,填好模型名后一次性上传+配对)
+  // 每一项 = 一个文件 + 对应模型名
+  const [pendingAudios, setPendingAudios] = useState<{ file: File; modelName: string }[]>([]);
   const audioInputRef = React.useRef<HTMLInputElement>(null);
+  // 删除:已勾选待移除的音频 id 集合(支持一次移除成组音频后再统一重建配对)
+  const [selectedRemoveIds, setSelectedRemoveIds] = useState<number[]>([]);
 
   // Fetch questionnaire details
   const { data: questionnaire, isLoading: isLoadingQuestionnaire, refetch: refetchQuestionnaire } = 
@@ -85,9 +87,8 @@ export default function AdminQuestionnaireDetail() {
   const { mutate: addAudio, isPending: isAddingAudio } =
     trpc.audio.addToQuestionnaire.useMutation({
       onSuccess: () => {
-        toast.success("音频已添加，盲测配对已重建");
-        setNewAudioFile(null);
-        setNewAudioModelName("");
+        toast.success("音频已批量添加，盲测配对已重建");
+        setPendingAudios([]);
         if (audioInputRef.current) audioInputRef.current.value = "";
         refetchAudios();
         refetchResponses();
@@ -95,14 +96,15 @@ export default function AdminQuestionnaireDetail() {
       onError: (error) => toast.error(error.message || "添加失败"),
     });
 
-  const { mutate: removeAudio } =
+  const { mutate: removeAudio, isPending: isRemovingAudio } =
     trpc.audio.removeFromQuestionnaire.useMutation({
       onSuccess: () => {
-        toast.success("音频已移除，盲测配对已重建");
+        toast.success("音频已批量移除，盲测配对已重建");
+        setSelectedRemoveIds([]);
         refetchAudios();
         refetchResponses();
       },
-      onError: (error) => toast.error(error.message || "移除失败"),
+      onError: (error) => toast.error(error.message || "移��失败"),
     });
 
   // Fetch responses with auto-refresh
@@ -208,36 +210,65 @@ export default function AdminQuestionnaireDetail() {
     }
   };
 
-  // 新增音频:读取文件 -> 调用后端(会重建盲测配对)
+  // 选择文件:把新选中的文件追加到待上传列表(默认模型名留空,由用户填写)
+  const handleSelectFiles = (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const added = Array.from(files).map((file) => ({ file, modelName: "" }));
+    setPendingAudios((prev) => [...prev, ...added]);
+    if (audioInputRef.current) audioInputRef.current.value = "";
+  };
+
+  const updatePendingModelName = (index: number, modelName: string) => {
+    setPendingAudios((prev) => prev.map((it, i) => (i === index ? { ...it, modelName } : it)));
+  };
+
+  const removePendingAudio = (index: number) => {
+    setPendingAudios((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  // 新增音频:等这一批全部选好并填好模型名后,一次性上传+重建配对
   const handleAddAudio = async () => {
-    if (!newAudioFile) {
-      toast.error("请选择音频文件");
+    if (pendingAudios.length === 0) {
+      toast.error("请先选择音频文件");
       return;
     }
-    if (!newAudioModelName.trim()) {
-      toast.error("请填写模型名称");
+    if (pendingAudios.some((it) => !it.modelName.trim())) {
+      toast.error("请为每个待上传音频填写模型名称");
       return;
     }
     if (audioResponseCount > 0 && !confirm("该问卷已有答卷，修改音频会清空已有答卷数据，确定继续？")) {
       return;
     }
     try {
-      const base = await readAudioForUpload(newAudioFile);
-      addAudio({
-        questionnaireId,
-        audios: [{ ...base, modelName: newAudioModelName.trim() }],
-      });
+      const audios = await Promise.all(
+        pendingAudios.map(async (it) => {
+          const base = await readAudioForUpload(it.file);
+          return { ...base, modelName: it.modelName.trim() };
+        })
+      );
+      addAudio({ questionnaireId, audios });
     } catch (e) {
       toast.error("文件读取失败");
     }
   };
 
-  const handleRemoveAudio = (audioFileId: number) => {
+  const toggleRemoveSelect = (audioFileId: number) => {
+    setSelectedRemoveIds((prev) =>
+      prev.includes(audioFileId) ? prev.filter((id) => id !== audioFileId) : [...prev, audioFileId]
+    );
+  };
+
+  // 批量移除:勾选成组音频后统一移除并重建一次配对
+  const handleRemoveSelected = () => {
+    if (selectedRemoveIds.length === 0) {
+      toast.error("请先勾选要移除的音频");
+      return;
+    }
     const msg = audioResponseCount > 0
-      ? "该问卷已有答卷，移除音频会清空已有答卷数据，确定移除？"
-      : "确定移除这个音频吗？将重建盲测配对。";
+      ? `该问卷已有答卷，移除 ${selectedRemoveIds.length} 个音频会清空已有答卷数据，确定移除？`
+      : `确定移除选中的 ${selectedRemoveIds.length} 个音频吗？将重建盲测配对。`;
     if (confirm(msg)) {
-      removeAudio({ questionnaireId, audioFileId });
+      removeAudio({ questionnaireId, audioFileIds: selectedRemoveIds });
     }
   };
 
@@ -561,7 +592,7 @@ export default function AdminQuestionnaireDetail() {
             <div>
               <h2 className="text-2xl font-bold text-slate-900">音频管理</h2>
               <p className="text-slate-600 mt-1">
-                管理本问卷的盲测音频，增删音频后会自动重建盲测配对。
+                可一次选择多个音频、分别填好模型名后统一上传；移除时勾选成组音频后一次移除。上传/移除完成才会重建盲测配对。
                 {audioResponseCount > 0 && (
                   <span className="text-red-600">（该问卷已有 {audioResponseCount} 份答卷，修改音频会清空已有答卷）</span>
                 )}
@@ -570,39 +601,57 @@ export default function AdminQuestionnaireDetail() {
 
             <Card>
               <CardHeader>
-                <CardTitle className="text-lg">新增音频</CardTitle>
-                <CardDescription>选择音频文件并填写对应的模型名称</CardDescription>
+                <CardTitle className="text-lg">批量新增音频</CardTitle>
+                <CardDescription>先选择一批音频文件，为每个文件填写模型名称，最后统一上传并重建配对</CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <div className="space-y-2">
-                    <Label>音频文件</Label>
-                    <Input
-                      ref={audioInputRef}
-                      type="file"
-                      accept="audio/*,.m4a"
-                      onChange={(e) => setNewAudioFile(e.target.files?.[0] || null)}
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>模型名称</Label>
-                    <Input
-                      placeholder="如：模型A"
-                      value={newAudioModelName}
-                      onChange={(e) => setNewAudioModelName(e.target.value)}
-                    />
-                  </div>
-                  <div className="flex items-end">
-                    <Button
-                      className="bg-blue-600 hover:bg-blue-700"
-                      onClick={handleAddAudio}
-                      disabled={isAddingAudio}
-                    >
-                      <Plus className="w-4 h-4 mr-2" />
-                      {isAddingAudio ? "上传中..." : "添加音频"}
-                    </Button>
-                  </div>
+                <div className="space-y-2">
+                  <Label>选择音频文件（可多选）</Label>
+                  <Input
+                    ref={audioInputRef}
+                    type="file"
+                    multiple
+                    accept="audio/*,.m4a"
+                    onChange={(e) => handleSelectFiles(e.target.files)}
+                  />
                 </div>
+
+                {pendingAudios.length > 0 && (
+                  <div className="space-y-2">
+                    <Label>待上传列表（{pendingAudios.length} 个，请为每个填写模型名）</Label>
+                    <div className="space-y-2">
+                      {pendingAudios.map((item, idx) => (
+                        <div key={idx} className="flex items-center gap-3 rounded-md border p-2">
+                          <Music className="w-4 h-4 text-slate-400 shrink-0" />
+                          <span className="flex-1 truncate text-sm text-slate-700">{item.file.name}</span>
+                          <Input
+                            className="w-40"
+                            placeholder="模型名称，如：模型A"
+                            value={item.modelName}
+                            onChange={(e) => updatePendingModelName(idx, e.target.value)}
+                          />
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-red-600 hover:text-red-700 hover:bg-red-50"
+                            onClick={() => removePendingAudio(idx)}
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <Button
+                  className="bg-blue-600 hover:bg-blue-700"
+                  onClick={handleAddAudio}
+                  disabled={isAddingAudio || pendingAudios.length === 0}
+                >
+                  <Plus className="w-4 h-4 mr-2" />
+                  {isAddingAudio ? "上传中..." : `上传并重建配对（${pendingAudios.length}）`}
+                </Button>
               </CardContent>
             </Card>
 
@@ -615,18 +664,41 @@ export default function AdminQuestionnaireDetail() {
             ) : (
               <Card>
                 <CardContent className="pt-6">
+                  <div className="mb-3 flex items-center justify-between">
+                    <span className="text-sm text-slate-600">
+                      已勾选 {selectedRemoveIds.length} 个音频
+                    </span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="text-red-600 border-red-200 hover:bg-red-50"
+                      onClick={handleRemoveSelected}
+                      disabled={isRemovingAudio || selectedRemoveIds.length === 0}
+                    >
+                      <Trash2 className="w-4 h-4 mr-1" />
+                      {isRemovingAudio ? "移除中..." : `批量移除（${selectedRemoveIds.length}）`}
+                    </Button>
+                  </div>
                   <Table>
                     <TableHeader>
                       <TableRow>
+                        <TableHead className="w-10">选择</TableHead>
                         <TableHead>文件名</TableHead>
                         <TableHead>模型名称</TableHead>
                         <TableHead>试听</TableHead>
-                        <TableHead>操作</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {questionnaireAudios.map((audio: any) => (
                         <TableRow key={audio.id}>
+                          <TableCell>
+                            <input
+                              type="checkbox"
+                              className="h-4 w-4"
+                              checked={selectedRemoveIds.includes(audio.id)}
+                              onChange={() => toggleRemoveSelect(audio.id)}
+                            />
+                          </TableCell>
                           <TableCell>
                             <span className="flex items-center gap-2">
                               <Music className="w-4 h-4 text-slate-400" />
@@ -641,23 +713,12 @@ export default function AdminQuestionnaireDetail() {
                               "-"
                             )}
                           </TableCell>
-                          <TableCell>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                            className="text-red-600 hover:text-red-700 hover:bg-red-50"
-                              onClick={() => handleRemoveAudio(audio.id)}
-                            >
-                              <Trash2 className="w-4 h-4 mr-1" />
-                              移除
-                            </Button>
-                          </TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
                   </Table>
                   <p className="text-xs text-slate-500 mt-3">
-                    提示：更换音频 = 移除旧音频 + 新增新音频。盲测按模型两两配对，需至少两个不同模型。
+                    提示：更换音频 = 勾选移除旧音频 + 批量新增新音频。盲测按模型两两配对，需至少两个不同模型。
                   </p>
                 </CardContent>
               </Card>

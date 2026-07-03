@@ -4,7 +4,6 @@ import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, router, protectedProcedure, adminProcedure } from "./_core/trpc";
 import { z } from "zod";
 import { storagePut } from "./storage";
-import { transcribeAudio } from "./_core/voiceTranscription";
 import { invokeLLM } from "./_core/llm";
 import * as db from "./db";
 import { TRPCError } from "@trpc/server";
@@ -239,18 +238,7 @@ export const appRouter = router({
 
             const audioFileId = getInsertId(result);
 
-            // 转写为可选增强,放到后台异步执行,不阻塞上传响应(避免每个文件都等
-            // fetch 音频 + 调用 Whisper 造成上传巨慢)。失败仅记日志,不影响上传。
-            void (async () => {
-              try {
-                const transcriptionResult = await transcribeAudio({ audioUrl: fileUrl });
-                if ("text" in transcriptionResult) {
-                  await db.updateAudioFile(audioFileId, { transcription: transcriptionResult.text });
-                }
-              } catch (err) {
-                console.error(`Transcription failed for ${audioInput.fileName}:`, err);
-              }
-            })();
+            // 已按需求取消 Whisper 转写:上传只做落库,不再调用转写(转写会拖慢上传)。
 
             uploadedAudios.push({ audioFileId, fileUrl, modelName: audioInput.modelName, transcription: null });
           }
@@ -386,14 +374,6 @@ export const appRouter = router({
           });
           const audioFileId = getInsertId(result);
           newAudios.push({ audioFileId, modelName: audioInput.modelName });
-          void (async () => {
-            try {
-              const t = await transcribeAudio({ audioUrl: fileUrl });
-              if ("text" in t) await db.updateAudioFile(audioFileId, { transcription: t.text });
-            } catch (err) {
-              console.error(`Transcription failed for ${audioInput.fileName}:`, err);
-            }
-          })();
         }
 
        await rebuildQuestionnairePairs(input.questionnaireId, newAudios);
@@ -401,17 +381,24 @@ export const appRouter = router({
       }),
 
     /**
-     * 从问卷中移除一个音频(删除音频记录),并重建盲测配对。
+     * 从问卷中移除一批音频(删除音频记录),删除完成后统一重建一次盲测配对。
+     * 支持一次移除成对/成组音频,避免每删一个就重建配对。
      * 同样会清空旧作答以保证数据一致。
      */
     removeFromQuestionnaire: adminProcedure
-      .input(z.object({ questionnaireId: z.number(), audioFileId: z.number() }))
+      .input(z.object({
+        questionnaireId: z.number(),
+        audioFileIds: z.array(z.number()).min(1),
+      }))
       .mutation(async ({ input, ctx }) => {
         const questionnaire = await db.getQuestionnaireById(input.questionnaireId);
         if (!questionnaire || questionnaire.creatorId !== ctx.user.id) {
           throw new TRPCError({ code: "FORBIDDEN" });
         }
-        await db.deleteAudioFile(input.audioFileId);
+        // 先批量删除音频记录,最后统一重建一次配对
+        for (const audioFileId of input.audioFileIds) {
+          await db.deleteAudioFile(audioFileId);
+        }
         await rebuildQuestionnairePairs(input.questionnaireId);
         return { success: true };
       }),
