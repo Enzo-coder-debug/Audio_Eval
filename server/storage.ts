@@ -23,10 +23,11 @@ function getS3(): { client: S3Client; bucket: string } {
   if (!_s3) {
     _s3 = new S3Client({
       region: ENV.ossRegion,
-      // 京东云 OSS 的 S3 兼容 endpoint,如 https://s3.cn-north-1.jdcloud-oss.com
+      // 京东云 OSS 的 S3 兼容 endpoint,如 https://s3-internal.cn-north-1.jdcloud-oss.com(内网)
       endpoint: ENV.ossEndpoint || undefined,
-      // 京东云 OSS 默认 virtual-hosted 风格(bucket.s3...);如需 path 风格设为 true。
-      forcePathStyle: false,
+      // 内网 endpoint 下 bucket 子域名(tts-files.s3-internal...)可能无 DNS 解析,
+      // 故默认走 path 风格(s3-internal.../tts-files/key),可用 OSS_FORCE_PATH_STYLE=false 关闭。
+      forcePathStyle: (process.env.OSS_FORCE_PATH_STYLE ?? "true") !== "false",
       credentials: {
         accessKeyId: ENV.ossAccessKeyId,
         secretAccessKey: ENV.ossSecretAccessKey,
