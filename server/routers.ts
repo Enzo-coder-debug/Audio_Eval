@@ -201,8 +201,18 @@ export const appRouter = router({
             dimensionsCount: parsedDimensions.length,
           };
         } catch (error) {
-          const errorMsg = error instanceof Error ? error.message : String(error);
-          console.error("Audio upload failed:", errorMsg);
+          // 打出尽可能完整的错误信息,便于定位 OSS/S3/DB 等底层错误(含 name/code/stack)
+          const anyErr = error as any;
+          const errorMsg =
+            (anyErr && (anyErr.message || anyErr.Code || anyErr.name)) ||
+            (typeof error === "string" ? error : JSON.stringify(anyErr));
+          console.error("Audio upload failed:", {
+            message: anyErr?.message,
+            name: anyErr?.name,
+            code: anyErr?.Code || anyErr?.code,
+            httpStatusCode: anyErr?.$metadata?.httpStatusCode,
+            stack: anyErr?.stack,
+          });
           throw new TRPCError({
             code: "INTERNAL_SERVER_ERROR",
             message: `Failed to upload audio files: ${errorMsg}`,

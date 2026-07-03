@@ -3,6 +3,7 @@
 // 生产环境:京东云 OSS(S3 兼容),上传走 PutObject,下载走预签名 GET URL。
 // 对外 URL 统一为 /manus-storage/{key},前端无需感知后端是哪种存储。
 
+import crypto from "node:crypto";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { ENV } from "./_core/env";
