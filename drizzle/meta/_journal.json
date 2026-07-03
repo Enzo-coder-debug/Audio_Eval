@@ -43,6 +43,13 @@
       "when": 1782809446991,
       "tag": "0005_busy_shaman",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "5",
+      "when": 1783079554175,
+      "tag": "0006_wise_trish_tilby",
+      "breakpoints": true
     }
   ]
 }
