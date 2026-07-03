@@ -46,6 +46,8 @@ export const audioFiles = mysqlTable("audioFiles", {
   transcription: longtext("transcription"), // auto-generated transcription from Whisper
   modelName: varchar("modelName", { length: 255 }), // e.g., "Model A", "Model B"
   asrText: longtext("asrText"), // ASR transcribed text
+  questionnaireId: int("questionnaireId"), // 音频直接归属的问卷(可为空,兼容旧记录);音频管理据此列出与配对
+  groupLabel: varchar("groupLabel", { length: 255 }), // 管理员指定的组别(如"query1"),同组内不同模型两两配对
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });

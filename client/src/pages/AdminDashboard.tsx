@@ -8,7 +8,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Upload, Plus, Music, FileText, LogOut, X, Loader2, Trash2 } from "lucide-react";
+import { Upload, Plus, Music, FileText, LogOut, X, Loader2, Trash2, Copy } from "lucide-react";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
 
@@ -60,6 +60,23 @@ export default function AdminDashboard() {
   const handleDelete = (id: number, title: string) => {
     if (window.confirm(`确定删除问卷「${title}」吗？该操作将同时删除其所有配对、维度和作答记录，且不可恢复。`)) {
       deleteQuestionnaire({ id });
+    }
+  };
+
+  // 复制问卷:创建一份草稿副本(含音频、组别、维度并按组别重建配对)
+  const { mutate: duplicateQuestionnaire, isPending: isDuplicating } = trpc.questionnaire.duplicate.useMutation({
+    onSuccess: () => {
+      toast.success("问卷已复制为草稿副本");
+      refetchQuestionnaires();
+    },
+    onError: (error) => {
+      toast.error(error.message || "复制失败，请重试");
+    },
+  });
+
+  const handleDuplicate = (id: number, title: string) => {
+    if (window.confirm(`确定复制问卷「${title}」吗？将创建一份草稿副本。`)) {
+      duplicateQuestionnaire({ id });
     }
   };
 
@@ -383,6 +400,16 @@ export default function AdminDashboard() {
                           onClick={() => setLocation(`/admin/questionnaire/${q.id}`)}
                         >
                           查看详情
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => handleDuplicate(q.id, q.title)}
+                          disabled={isDuplicating}
+                          className="ml-2"
+                        >
+                          <Copy className="w-4 h-4 mr-1" />
+                          复制问卷
                         </Button>
                         <Button
                           variant="outline"

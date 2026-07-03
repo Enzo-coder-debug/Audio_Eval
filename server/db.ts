@@ -438,21 +438,12 @@ export async function getAudioFilesByQuestionnaire(questionnaireId: number) {
   const db = await getDb();
   if (!db) return [] as AudioFile[];
 
-  const pairs = await db.select().from(blindTestPairs)
-    .where(eq(blindTestPairs.questionnaireId, questionnaireId))
-    .orderBy(blindTestPairs.pairIndex);
-
-  const ids: number[] = [];
-  for (const p of pairs) {
-    if (!ids.includes(p.leftAudioFileId)) ids.push(p.leftAudioFileId);
-    if (!ids.includes(p.rightAudioFileId)) ids.push(p.rightAudioFileId);
-  }
-  if (ids.length === 0) return [] as AudioFile[];
-
-  const rows = await db.select().from(audioFiles).where(inArray(audioFiles.id, ids));
-  // 按 ids 的出现顺序排序
-  const orderMap = new Map(ids.map((id, idx) => [id, idx]));
-  return rows.sort((a, b) => (orderMap.get(a.id)! - orderMap.get(b.id)!));
+  // 音频现在直接归属问卷(audioFiles.questionnaireId),不再依赖配对表反查,
+  // 这样"已上传但尚未生成配对"的音频也能被列出与设置组别。
+  const rows = await db.select().from(audioFiles)
+    .where(eq(audioFiles.questionnaireId, questionnaireId))
+    .orderBy(audioFiles.id);
+  return rows;
 }
 
 // 删除某问卷的全部盲测配对(重建配对前调用)。

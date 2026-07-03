@@ -55,32 +55,33 @@ function parseScoringStandardToDimensions(
   return dimensions;
 }
 
-// 根据一组音频(含 modelName)生成盲测配对数据(左右已随机、整体已打乱顺序)。
-// 规则:按 modelName 分组保持顺序 -> 每两个模型按相同序号一一配对 ->
+// 根据一组音频(含 modelName 与 groupLabel)生成盲测配对数据(左右已随机、整体已打乱顺序)。
+// 规则:按 groupLabel 分组(同一组=同一段文案/query) -> 组内不同 modelName 两两配对 ->
 // 随机左右位置消除位置偏见 -> Fisher-Yates 打乱展示顺序。
-// upload 首次上传与后续音频编辑(增删换)重建配对时共用此逻辑,保证行为一致。
+// 组别为空的音频不参与配对;同组内同模型不配对。首次生成与重建配对共用此逻辑。
 export function buildBlindTestPairs(
   questionnaireId: number,
-  audios: { audioFileId: number; modelName: string }[]
+  audios: { audioFileId: number; modelName: string; groupLabel?: string | null }[]
 ): { questionnaireId: number; leftAudioFileId: number; rightAudioFileId: number; pairIndex: number }[] {
-  const groups = new Map<string, { audioFileId: number }[]>();
+  // 按 groupLabel 分组(空组别跳过)
+  const groups = new Map<string, { audioFileId: number; modelName: string }[]>();
   for (const a of audios) {
-    if (!groups.has(a.modelName)) groups.set(a.modelName, []);
-    groups.get(a.modelName)!.push({ audioFileId: a.audioFileId });
+    const label = (a.groupLabel || "").trim();
+    if (!label) continue; // 未指定组别的音频不参与配对
+    if (!groups.has(label)) groups.set(label, []);
+    groups.get(label)!.push({ audioFileId: a.audioFileId, modelName: a.modelName });
   }
-  const modelNames = Array.from(groups.keys());
 
   const rawPairs: { leftId: number; rightId: number }[] = [];
-  for (let m = 0; m < modelNames.length; m++) {
-    for (let n = m + 1; n < modelNames.length; n++) {
-      const listA = groups.get(modelNames[m])!;
-      const listB = groups.get(modelNames[n])!;
-      const count = Math.min(listA.length, listB.length);
-      for (let k = 0; k < count; k++) {
+  // 组内不同模型两两配对
+  for (const list of groups.values()) {
+    for (let i = 0; i < list.length; i++) {
+      for (let j = i + 1; j < list.length; j++) {
+        if (list[i].modelName === list[j].modelName) continue; // 同模型不比较
         const swapSides = Math.random() > 0.5;
         rawPairs.push({
-          leftId: swapSides ? listB[k].audioFileId : listA[k].audioFileId,
-          rightId: swapSides ? listA[k].audioFileId : listB[k].audioFileId,
+          leftId: swapSides ? list[j].audioFileId : list[i].audioFileId,
+          rightId: swapSides ? list[i].audioFileId : list[j].audioFileId,
         });
       }
     }
@@ -99,38 +100,21 @@ export function buildBlindTestPairs(
   }));
 }
 
-// 音频编辑(增/删)后重建某问卷的盲测配对:
-// 取当前问卷音频 -> 删旧配对 -> 按新音频集重新生成配对。
-// 由于旧配对与旧答案(answers.blindTestPairId)绑定,音频变化会让旧作答失去意义,
+// 重建某问卷的盲测配对:取当前问卷音频(已直接归属问卷) -> 清空旧作答与旧配对
+// -> 按 groupLabel 分组重新生成配对。
+// 由于旧配对与旧答案(answers.blindTestPairId)绑定,音频/组别变化会让旧作答失去意义,
 // 故先清空该问卷的旧作答与统计,避免答案指向已删除的配对造成数据错位。
-// 音频编辑(增/删)后重建某问卷的盲测配对:
-// 取当前问卷音频 -> 删旧配对 -> 按新音频集重新生成配对。
-// 由于旧配对与旧答案(answers.blindTestPairId)绑定,音频变化会让旧作答失去意义,
-// 故先清空该问卷的旧作答与统计,避免答案指向已删除的配对造成数据错位。
-// extraAudios: 新增但尚未进入配对表的音频(addToQuestionnaire 时传入)。
-async function rebuildQuestionnairePairs(
-  questionnaireId: number,
-  extraAudios: { audioFileId: number; modelName: string }[] = []
-) {
-  // 先在删除旧配对之前取出当前音频集(getAudioFilesByQuestionnaire 依赖配对反查)。
-  const existing = await db.getAudioFilesByQuestionnaire(questionnaireId);
-
+// 音频现直接归属问卷(audioFiles.questionnaireId),无需再传 extraAudios。
+async function rebuildQuestionnairePairs(questionnaireId: number) {
   await db.deleteResponsesByQuestionnaire(questionnaireId);
   await db.deleteBlindTestPairsByQuestionnaire(questionnaireId);
 
-  const all = [
-    ...existing.map(a => ({ audioFileId: a.id, modelName: a.modelName || "未命名模型" })),
-    ...extraAudios,
-  ];
-  // 去重(以 audioFileId 为准)
-  const seen = new Set<number>();
-  const audios = all.filter(a => {
-    if (seen.has(a.audioFileId)) return false;
-    seen.add(a.audioFileId);
-    return true;
-  });
-
-  if (audios.length < 2) return; // 不足两个音频无法配对,清空后留空即可
+  const existing = await db.getAudioFilesByQuestionnaire(questionnaireId);
+  const audios = existing.map(a => ({
+    audioFileId: a.id,
+    modelName: a.modelName || "未命名模型",
+    groupLabel: a.groupLabel,
+  }));
 
   const pairs = buildBlindTestPairs(questionnaireId, audios);
   if (pairs.length > 0) await db.createBlindTestPairs(pairs);
@@ -211,12 +195,26 @@ export const appRouter = router({
           mimeType: z.enum(["audio/mpeg", "audio/wav", "audio/mp4"]),
           fileSizeBytes: z.number(),
           modelName: z.string().min(1), // New field for model name
+          groupLabel: z.string().optional(), // 组别(可选),同组不同模型两两配对
         })),
         evaluationCopywriting: z.string().min(10),
         scoringStandard: z.string().min(10),
       }))
       .mutation(async ({ input, ctx }) => {
         try {
+          // 先创建问卷,再上传音频并直接归属到该问卷(audioFiles.questionnaireId)。
+          const qResult = await db.createQuestionnaire({
+            creatorId: ctx.user.id,
+            title: input.title,
+            description: "",
+            evaluationCopywriting: input.evaluationCopywriting,
+            scoringStandard: input.scoringStandard,
+            status: "draft",
+            audioFileId: null, // 盲测问卷,不绑定单个音频
+            audioUrl: null,
+          });
+          const questionnaireId = getInsertId(qResult);
+
           const uploadedAudios: { audioFileId: number; fileUrl: string; modelName: string; transcription: string | null }[] = [];
 
           for (const audioInput of input.audios) {
@@ -224,7 +222,7 @@ export const appRouter = router({
             const fileKey = `audio/${ctx.user.id}/${Date.now()}-${audioInput.fileName}`;
             const { url: fileUrl } = await storagePut(fileKey, audioInput.fileData, audioInput.mimeType);
 
-            // Create audio file record
+            // 创建音频记录并直接归属问卷。groupLabel 可选,默认空(由管理员后续在音频管理里指定)。
             const result = await db.createAudioFile({
               uploaderId: ctx.user.id,
               fileName: audioInput.fileName,
@@ -233,43 +231,38 @@ export const appRouter = router({
               mimeType: audioInput.mimeType,
               fileSizeBytes: audioInput.fileSizeBytes,
               transcription: null,
-              modelName: audioInput.modelName, // Save model name
+              modelName: audioInput.modelName,
+              questionnaireId,
+              groupLabel: audioInput.groupLabel?.trim() || null,
             });
 
             const audioFileId = getInsertId(result);
-
-            // 已按需求取消 Whisper 转写:上传只做落库,不再调用转写(转写会拖慢上传)。
-
             uploadedAudios.push({ audioFileId, fileUrl, modelName: audioInput.modelName, transcription: null });
           }
 
-          // Create a single questionnaire for this batch of audios
-          const qResult = await db.createQuestionnaire({
-            creatorId: ctx.user.id,
-            title: input.title,
-            description: "",
-            evaluationCopywriting: input.evaluationCopywriting,
-            scoringStandard: input.scoringStandard,
-            status: "draft",
-            audioFileId: null, // This questionnaire is for blind test, not a single audio
-            audioUrl: null,
-          });
-
-          const questionnaireId = getInsertId(qResult);
-
-          // 生成盲测配对(抽取为 buildBlindTestPairs helper,与音频编辑重建配对共用):
-          // 按 modelName 分组保持顺序 -> 每两个模型按相同序号一一配对 ->
-          // 随机左右位置消除位置偏见 -> 打乱展示顺序。
-          const blindTestPairsData = buildBlindTestPairs(
-            questionnaireId,
-            uploadedAudios.map(a => ({ audioFileId: a.audioFileId, modelName: a.modelName }))
-          );
-          await db.createBlindTestPairs(blindTestPairsData);
+          // 按需求取消"按序号自动配对":上传后不自动生成盲测配对。
+          // 管理员�在音频管理页为音频指定组别(groupLabel),再手动点"生成盲测配对"。
+          // 若上传时已带组别,则可直接生成一次;否则留空等待管理员配置。
+          const hasAnyGroup = uploadedAudios.length > 0 &&
+            input.audios.some(a => (a.groupLabel || "").trim().length > 0);
+          let blindTestPairsCount = 0;
+          if (hasAnyGroup) {
+            const pairs = buildBlindTestPairs(
+              questionnaireId,
+              uploadedAudios.map((a, i) => ({
+                audioFileId: a.audioFileId,
+                modelName: a.modelName,
+                groupLabel: input.audios[i].groupLabel,
+              }))
+            );
+            if (pairs.length > 0) await db.createBlindTestPairs(pairs);
+            blindTestPairsCount = pairs.length;
+          }
 
           // 根据评分标准文本自动解析并写入评分维度,管理员后续可在详情页增删。
           const parsedDimensions = parseScoringStandardToDimensions(input.scoringStandard);
           await db.createEvaluationDimensions(
-            parsedDimensions.map((d, idx) => ({
+          parsedDimensions.map((d, idx) => ({
               questionnaireId,
               dimensionName: d.dimensionName,
               description: d.description,
@@ -280,7 +273,7 @@ export const appRouter = router({
           return {
             questionnaireId,
             uploadedAudios,
-            blindTestPairsCount: blindTestPairsData.length,
+            blindTestPairsCount,
             dimensionsCount: parsedDimensions.length,
           };
         } catch (error) {
@@ -337,8 +330,8 @@ export const appRouter = router({
       }),
 
     /**
-     * 向已有问卷新增音频,并重建盲测配对。
-     * 若问卷已有作答记录,旧配对会��效,故一并清空旧作答(避免答案错位到不存在的配对)。
+     * 向已有问卷新增音频(可带组别),仅落库归属问卷,不自动配对。
+     * 管理员在音频管理页设置好组别后,再手动点"生成盲测配对"。
      */
     addToQuestionnaire: adminProcedure
       .input(z.object({
@@ -349,6 +342,7 @@ export const appRouter = router({
           mimeType: z.enum(["audio/mpeg", "audio/wav", "audio/mp4"]),
           fileSizeBytes: z.number(),
           modelName: z.string().min(1),
+          groupLabel: z.string().optional(),
         })).min(1),
       }))
       .mutation(async ({ input, ctx }) => {
@@ -357,12 +351,11 @@ export const appRouter = router({
           throw new TRPCError({ code: "FORBIDDEN" });
         }
 
-        // 上传新音频并落库
-        const newAudios: { audioFileId: number; modelName: string }[] = [];
+        // 上传新音频并直接归属该问卷(不自动配对)
         for (const audioInput of input.audios) {
           const fileKey = `audio/${ctx.user.id}/${Date.now()}-${audioInput.fileName}`;
           const { url: fileUrl } = await storagePut(fileKey, audioInput.fileData, audioInput.mimeType);
-          const result = await db.createAudioFile({
+          await db.createAudioFile({
             uploaderId: ctx.user.id,
             fileName: audioInput.fileName,
             fileKey,
@@ -371,19 +364,16 @@ export const appRouter = router({
             fileSizeBytes: audioInput.fileSizeBytes,
             transcription: null,
             modelName: audioInput.modelName,
+            questionnaireId: input.questionnaireId,
+            groupLabel: audioInput.groupLabel?.trim() || null,
           });
-          const audioFileId = getInsertId(result);
-          newAudios.push({ audioFileId, modelName: audioInput.modelName });
         }
-
-       await rebuildQuestionnairePairs(input.questionnaireId, newAudios);
         return { success: true };
       }),
 
     /**
-     * 从问卷中移除一批音频(删除音频记录),删除完成后统一重建一次盲测配对。
-     * 支持一次移除成对/成组音频,避免每删一个就重建配对。
-     * 同样会清空旧作答以保证数据一致。
+     * 从问卷中移除一批音频(仅删除音频记录),不自动重建配对。
+     * 管理员移除/调整完成后,再手动点"生成盲测配对"统一重建。
      */
     removeFromQuestionnaire: adminProcedure
       .input(z.object({
@@ -395,12 +385,49 @@ export const appRouter = router({
         if (!questionnaire || questionnaire.creatorId !== ctx.user.id) {
           throw new TRPCError({ code: "FORBIDDEN" });
         }
-        // 先批量删除音频记录,最后统一重建一次配对
         for (const audioFileId of input.audioFileIds) {
           await db.deleteAudioFile(audioFileId);
         }
-        await rebuildQuestionnairePairs(input.questionnaireId);
         return { success: true };
+      }),
+
+    /**
+     * 批量设置音频组别(groupLabel)。同组内不同模型两两配对。
+     * 仅更新组别,不触发配对;管理员配置好后再手动点"生成盲测配对"。
+     */
+    updateGroupLabels: adminProcedure
+      .input(z.object({
+        questionnaireId: z.number(),
+        items: z.array(z.object({
+          audioFileId: z.number(),
+          groupLabel: z.string(),
+        })).min(1),
+      }))
+      .mutation(async ({ input, ctx }) => {
+        const questionnaire = await db.getQuestionnaireById(input.questionnaireId);
+        if (!questionnaire || questionnaire.creatorId !== ctx.user.id) {
+          throw new TRPCError({ code: "FORBIDDEN" });
+        }
+        for (const it of input.items) {
+          await db.updateAudioFile(it.audioFileId, { groupLabel: it.groupLabel.trim() || null });
+        }
+        return { success: true };
+      }),
+
+    /**
+     * 手动生成/重建盲测配对:按当前音频的组别(groupLabel),同组内不同模型两两配对。
+     * 会清空该问卷的旧配对与旧作答(音频/组别变化后旧作答已失去意义)。
+     */
+    generatePairs: adminProcedure
+      .input(z.object({ questionnaireId: z.number() }))
+      .mutation(async ({ input, ctx }) => {
+        const questionnaire = await db.getQuestionnaireById(input.questionnaireId);
+        if (!questionnaire || questionnaire.creatorId !== ctx.user.id) {
+          throw new TRPCError({ code: "FORBIDDEN" });
+        }
+        await rebuildQuestionnairePairs(input.questionnaireId);
+        const pairs = await db.getBlindTestPairsByQuestionnaire(input.questionnaireId);
+        return { success: true, pairsCount: pairs.length };
       }),
   }),
 
@@ -647,6 +674,88 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
         }
         await db.deleteQuestionnaireCascade(input.id);
         return { success: true };
+      }),
+
+    /**
+     * Duplicate an existing questionnaire (creates a draft copy).
+     * 复制问卷基本信息、音频记录(共享OSS对象)、评分维度,并按组别重建盲测配对。
+     */
+    duplicate: adminProcedure
+      .input(z.object({ id: z.number() }))
+      .mutation(async ({ input, ctx }) => {
+        const source = await db.getQuestionnaireById(input.id);
+        if (!source || source.creatorId !== ctx.user.id) {
+          throw new TRPCError({ code: "FORBIDDEN" });
+        }
+
+        // 1. 复制问卷基本信息(status=draft, shareToken=null 避免唯一约束冲突)
+        const qResult = await db.createQuestionnaire({
+          creatorId: ctx.user.id,
+          title: `${source.title}（副本）`,
+          description: source.description ?? "",
+          evaluationCopywriting: source.evaluationCopywriting,
+          scoringStandard: source.scoringStandard,
+          status: "draft",
+          audioFileId: null,
+          audioUrl: null,
+          shareToken: null,
+          validFrom: null,
+          validUntil: null,
+        });
+        const newQuestionnaireId = getInsertId(qResult);
+
+        // 2. 复制音频�录(新 questionnaireId, 保留 groupLabel/modelName/OSS 对象共享)
+        const sourceAudios = await db.getAudioFilesByQuestionnaire(input.id);
+        const copiedAudios: { audioFileId: number; modelName: string; groupLabel: string | null }[] = [];
+        for (const a of sourceAudios) {
+          const r = await db.createAudioFile({
+            uploaderId: ctx.user.id,
+            fileName: a.fileName,
+            fileKey: a.fileKey,
+            fileUrl: a.fileUrl,
+            mimeType: a.mimeType,
+            fileSizeBytes: a.fileSizeBytes,
+            transcription: null,
+            modelName: a.modelName,
+            questionnaireId: newQuestionnaireId,
+            groupLabel: a.groupLabel ?? null,
+          });
+          copiedAudios.push({
+            audioFileId: getInsertId(r),
+            modelName: a.modelName ?? "",
+            groupLabel: a.groupLabel ?? null,
+          });
+        }
+
+        // 3. 复制评分维度
+        const sourceDimensions = await db.getEvaluationDimensionsByQuestionnaire(input.id);
+        if (sourceDimensions.length > 0) {
+          await db.createEvaluationDimensions(
+            sourceDimensions.map((d, idx) => ({
+              questionnaireId: newQuestionnaireId,
+              dimensionName: d.dimensionName,
+              description: d.description,
+              weight: d.weight,
+              maxScore: d.maxScore,
+              orderIndex: d.orderIndex ?? idx,
+            }))
+          );
+        }
+
+        // 4. 按组别重建盲测配��
+        let blindTestPairsCount = 0;
+        const pairs = buildBlindTestPairs(newQuestionnaireId, copiedAudios);
+        if (pairs.length > 0) {
+          await db.createBlindTestPairs(pairs);
+          blindTestPairsCount = pairs.length;
+        }
+
+        return {
+          questionnaireId: newQuestionnaireId,
+          audiosCount: copiedAudios.length,
+          dimensionsCount: sourceDimensions.length,
+          blindTestPairsCount,
+        };
       }),
   }),
 
