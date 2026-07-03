@@ -1,5 +1,7 @@
 export const ENV = {
-  appId: process.env.VITE_APP_ID ?? "",
+  // 兜底非空默认值：JWT 会把 appId 写入 payload，且 verifySession 要求 appId 非空，
+  // 否则账密登录(未配 VITE_APP_ID)时 token 校验必然失败 → auth.me 返回 null → 登录后 404。
+  appId: process.env.VITE_APP_ID || "audio-eval",
   cookieSecret: process.env.JWT_SECRET ?? "",
   databaseUrl: process.env.DATABASE_URL ?? "",
   oAuthServerUrl: process.env.OAUTH_SERVER_URL ?? "",
