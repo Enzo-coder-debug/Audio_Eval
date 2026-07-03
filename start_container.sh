@@ -1,4 +1,8 @@
 #!/bin/bash
+# =============================================================================
+# JDOS 容器入口脚本（平台标准模板，勿删初始化逻辑）
+# 由 Dockerfile ENTRYPOINT 调用：先做平台环境初始化，再切 admin 用户启动应用。
+# =============================================================================
 
 #mirror_server='172.25.134.109'
 mirror_server='mirrors.jdfin.local'
@@ -15,23 +19,21 @@ while true;do
       break
     else
       echo 'http test error'
-    fi  
+    fi
   else
     echo "network is unnormal"
     ip ad sh
     ip ro sh
-  fi  
+  fi
   sleep 2
 done
 
 curl -sL  $docker_init_url | bash
 [[ -d /export/Logs ]] || { mkdir -p /export/Logs && chown admin:admin /export/Logs; }
 
-######以上内容都是初始化系统依赖脚本，原样复制即可#######
-######以下内容是启动应用内容，根据实际情况填写######
 [ -f "/home/admin/start_before.sh" ] && su -m admin -c "bash /home/admin/start_before.sh"
-# 比如代码在/opt目录下，运行依赖/export/log/redis，则需创建并给相关目录赋权
-mkdir -p /export/log/redis/
-chown -R admin:admin /opt/ /export/log/redis/
-# 必须要切换到admin用户去启动应用
+# 应用代码在 /opt/app，运行日志在 /export/log/audio-eval，创建并赋权
+mkdir -p /export/log/audio-eval/
+chown -R admin:admin /opt/ /export/log/audio-eval/
+# 必须切换到 admin 用户启动应用
 su -m admin -c "bash /home/admin/start.sh"
