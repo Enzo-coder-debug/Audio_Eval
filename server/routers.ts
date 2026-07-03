@@ -112,20 +112,21 @@ export const appRouter = router({
             });
 
             const audioFileId = getInsertId(result);
-            let transcription: string | null = null;
 
-            // Transcribe audio asynchronously
-            try {
-              const transcriptionResult = await transcribeAudio({ audioUrl: fileUrl });
-              if ('text' in transcriptionResult) {
-                transcription = transcriptionResult.text;
-                await db.updateAudioFile(audioFileId, { transcription });
+            // 转写为可选增强,放到后台异步执行,不阻塞上传响应(避免每个文件都等
+            // fetch 音频 + 调用 Whisper 造成上传巨慢)。失败仅记日志,不影响上传。
+            void (async () => {
+              try {
+                const transcriptionResult = await transcribeAudio({ audioUrl: fileUrl });
+                if ("text" in transcriptionResult) {
+                  await db.updateAudioFile(audioFileId, { transcription: transcriptionResult.text });
+                }
+              } catch (err) {
+                console.error(`Transcription failed for ${audioInput.fileName}:`, err);
               }
-            } catch (err) {
-              console.error(`Transcription failed for ${audioInput.fileName}:`, err);
-            }
+            })();
 
-            uploadedAudios.push({ audioFileId, fileUrl, modelName: audioInput.modelName, transcription });
+            uploadedAudios.push({ audioFileId, fileUrl, modelName: audioInput.modelName, transcription: null });
           }
 
           // Create a single questionnaire for this batch of audios
