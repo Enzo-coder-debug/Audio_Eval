@@ -3,7 +3,7 @@ import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, router, protectedProcedure, adminProcedure } from "./_core/trpc";
 import { z } from "zod";
-import { storagePut } from "./storage";
+import { storagePut, buildAudioObjectKey } from "./storage";
 import { invokeLLM } from "./_core/llm";
 import * as db from "./db";
 import { TRPCError } from "@trpc/server";
@@ -217,10 +217,21 @@ export const appRouter = router({
 
           const uploadedAudios: { audioFileId: number; fileUrl: string; modelName: string; transcription: string | null }[] = [];
 
-          for (const audioInput of input.audios) {
-            // Upload to S3
-            const fileKey = `audio/${ctx.user.id}/${Date.now()}-${audioInput.fileName}`;
-            const { url: fileUrl } = await storagePut(fileKey, audioInput.fileData, audioInput.mimeType);
+          // 并行上传所有音频到 OSS(按日期+时间戳子文件夹归档),再顺序写库保持组别索引对应。
+          // 之前是逐个 await 串行上传,N 个文件耗时≈N×单个,这里改为并发以显著提速。
+          const uploadResults = await Promise.all(
+            input.audios.map((audioInput) => {
+              const fileKey = buildAudioObjectKey(ctx.user.id, audioInput.fileName);
+              return storagePut(fileKey, audioInput.fileData, audioInput.mimeType).then((r) => ({
+                fileKey,
+                fileUrl: r.url,
+              }));
+            })
+          );
+
+          for (let i = 0; i < input.audios.length; i++) {
+            const audioInput = input.audios[i];
+            const { fileKey, fileUrl } = uploadResults[i];
 
             // 创建音频记录并直接归属问卷。groupLabel 可选,默认空(由管理员后续在音频管理里指定)。
             const result = await db.createAudioFile({
@@ -351,10 +362,20 @@ export const appRouter = router({
           throw new TRPCError({ code: "FORBIDDEN" });
         }
 
-        // 上传新音频并直接归属该问卷(不自动配对)
-        for (const audioInput of input.audios) {
-          const fileKey = `audio/${ctx.user.id}/${Date.now()}-${audioInput.fileName}`;
-          const { url: fileUrl } = await storagePut(fileKey, audioInput.fileData, audioInput.mimeType);
+        // 上传新音频并直接归属该问卷(不自动配对)。并行上传到 OSS(按日期+时间戳子文件夹归档),再顺序写库。
+        const uploadResults = await Promise.all(
+          input.audios.map((audioInput) => {
+            const fileKey = buildAudioObjectKey(ctx.user.id, audioInput.fileName);
+            return storagePut(fileKey, audioInput.fileData, audioInput.mimeType).then((r) => ({
+              fileKey,
+              fileUrl: r.url,
+            }));
+          })
+        );
+
+        for (let i = 0; i < input.audios.length; i++) {
+          const audioInput = input.audios[i];
+          const { fileKey, fileUrl } = uploadResults[i];
           await db.createAudioFile({
             uploaderId: ctx.user.id,
             fileName: audioInput.fileName,

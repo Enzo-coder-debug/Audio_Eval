@@ -41,6 +41,21 @@ function normalizeKey(relKey: string): string {
   return relKey.replace(/^\/+/, "");
 }
 
+/**
+ * 生成带"日期 + 时间戳"子文件夹的对象 key,便于在 bucket 中按上传时间归档,
+ * 避免同一前缀(目录)下对象无限堆积,也方便运维按天检索/清理。
+ * 结构:audio/<userId>/<YYYYMMDD>/<HHmmss>-<epochMs>-<原文件名>
+ * 参考 script/oss_upload.py 的按前缀(prefix)组织对象的思路。
+ */
+export function buildAudioObjectKey(userId: number | string, fileName: string): string {
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const datePart = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`;
+  const timePart = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  const safeName = fileName.replace(/[\\/]+/g, "_");
+  return `audio/${userId}/${datePart}/${timePart}-${now.getTime()}-${safeName}`;
+}
+
 function appendHashSuffix(relKey: string): string {
   const hash = crypto.randomUUID().replace(/-/g, "").slice(0, 8);
   const lastDot = relKey.lastIndexOf(".");
