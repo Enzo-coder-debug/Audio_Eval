@@ -8,9 +8,10 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { ArrowLeft, Plus, Edit2, Trash2, Music, Send, Copy, Globe, BarChart3 } from "lucide-react";
+import { ArrowLeft, Plus, Edit2, Trash2, Music, Send, Copy, Globe, BarChart3, Download } from "lucide-react";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
+import * as XLSX from "xlsx";
 
 // 读取音频文件为上传所需格式(与 AdminDashboard 一致)。
 async function readAudioForUpload(file: File) {
@@ -37,6 +38,9 @@ export default function AdminQuestionnaireDetail() {
   const [dimensionDescription, setDimensionDescription] = useState("");
   const [dimensionWeight, setDimensionWeight] = useState("1");
   const [dimensionMaxScore, setDimensionMaxScore] = useState("10");
+  // 编辑评分标准(保存后自动重新解析并同步维度)
+  const [isStandardDialogOpen, setIsStandardDialogOpen] = useState(false);
+  const [standardDraft, setStandardDraft] = useState("");
   const [expandedResponseId, setExpandedResponseId] = useState<number | null>(null);
 
   // 音频管理:待新增音频列表(支持一次选多个,填好模型名后一次性上传+配对)
@@ -183,6 +187,41 @@ export default function AdminQuestionnaireDetail() {
         toast.error(error.message || "删除失败");
       },
     });
+
+  // 保存评分标准:变更后端会自动重新解析并同步维度(删旧建新);若已有作答会一并清理
+  const { mutate: updateStandard, isPending: isUpdatingStandard } =
+    trpc.questionnaire.update.useMutation({
+      onSuccess: (res: any) => {
+        if (res?.dimensionsUpdated) {
+          toast.success(`评分标准已更新，已重新解析 ${res.dimensionsCount ?? 0} 个维度`);
+        } else {
+          toast.success("评分标准已更新");
+        }
+        setIsStandardDialogOpen(false);
+        refetchDimensions();
+        refetchQuestionnaire();
+      },
+      onError: (error) => {
+        toast.error(error.message || "更新失败");
+      },
+    });
+
+  const handleSaveStandard = () => {
+    if (!standardDraft.trim()) {
+      toast.error("请填写评分标准");
+      return;
+    }
+    if (
+      standardDraft !== (questionnaire?.scoringStandard || "") &&
+      audioResponseCount > 0 &&
+      !window.confirm(
+        `修改评分标准会重新解析评分维度，并清空该问卷已有的 ${audioResponseCount} 份作答记录，确定继续吗？`
+      )
+    ) {
+      return;
+    }
+    updateStandard({ id: questionnaireId, scoringStandard: standardDraft });
+  };
 
   const resetDimensionForm = () => {
     setDimensionName("");
@@ -360,6 +399,71 @@ export default function AdminQuestionnaireDetail() {
     return order.map(pid => ({ pairId: pid, answers: map.get(pid)! }));
   };
 
+  // 导出答卷详情到 Excel:每个答卷人一个 sheet,行=各盲测配对×维度的选择结果
+  const handleExportExcel = () => {
+    if (!responses || responses.length === 0) {
+      toast.error("暂无答卷可导出");
+      return;
+    }
+    const wb = XLSX.utils.book_new();
+    const usedNames = new Set<string>();
+    // sheet 名去重且满足 Excel 限制(<=31字符,不含 : \ / ? * [ ])
+    const safeSheetName = (raw: string, idx: number) => {
+      let name = (raw || `答卷${idx + 1}`).replace(/[:\\/?*[\]]/g, "_").slice(0, 28);
+      let candidate = name || `答卷${idx + 1}`;
+      let n = 1;
+      while (usedNames.has(candidate)) {
+        candidate = `${name.slice(0, 25)}_${n++}`;
+      }
+      usedNames.add(candidate);
+      return candidate;
+    };
+
+    responses.forEach((response: any, idx: number) => {
+      const rows: any[] = [];
+      // 每个 sheet 头部信息
+      rows.push({ 配对: "访客名称", 维度: response.visitorName || "匿名", 选择结果: "" });
+      rows.push({ 配对: "访客IP", 维度: response.visitorIp || "-", 选择结果: "" });
+      rows.push({
+        配对: "状态",
+        维度:
+          response.status === "graded" ? "已评分" : response.status === "submitted" ? "已提交" : "进行中",
+        选择结果: "",
+      });
+      rows.push({
+        配对: "提交时间",
+        维度: response.submittedAt ? new Date(response.submittedAt).toLocaleString("zh-CN") : "-",
+        选择结果: "",
+      });
+      rows.push({ 配对: "", 维度: "", 选择结果: "" });
+
+      const groups = groupAnswersByPair(response.answers || []);
+      for (const group of groups) {
+        const pair = pairInfoMap.get(group.pairId);
+        const leftAudio = audioLabel(pair?.leftFileName);
+        const rightAudio = audioLabel(pair?.rightFileName);
+        const groupTitle = leftAudio === rightAudio ? leftAudio : `${leftAudio} vs ${rightAudio}`;
+        for (const a of group.answers) {
+          rows.push({
+            配对: groupTitle,
+            维度: a.evaluationDimensionId
+              ? dimensionNameMap.get(a.evaluationDimensionId) || `维度#${a.evaluationDimensionId}`
+              : "评价",
+            选择结果: verdictLabel(pair, a.blindTestChoice),
+          });
+        }
+      }
+
+      const ws = XLSX.utils.json_to_sheet(rows, { header: ["配对", "维度", "选择结果"] });
+      ws["!cols"] = [{ wch: 24 }, { wch: 20 }, { wch: 24 }];
+      XLSX.utils.book_append_sheet(wb, ws, safeSheetName(response.visitorName, idx));
+    });
+
+    const fileName = `${(questionnaire?.title || "答卷详情").replace(/[\\/?*[\]:]/g, "_")}.xlsx`;
+    XLSX.writeFile(wb, fileName);
+    toast.success(`已导出 ${responses.length} 份答卷`);
+  };
+
   if (isLoadingQuestionnaire) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
@@ -480,7 +584,56 @@ export default function AdminQuestionnaireDetail() {
                 <h2 className="text-2xl font-bold text-slate-900">测评维度</h2>
                 <p className="text-slate-600 mt-1">定义问卷的评分维度</p>
               </div>
-              <Dialog open={isDimensionDialogOpen} onOpenChange={setIsDimensionDialogOpen}>
+              <div className="flex items-center gap-2">
+                <Dialog open={isStandardDialogOpen} onOpenChange={setIsStandardDialogOpen}>
+                  <DialogTrigger asChild>
+                    <Button
+                      variant="outline"
+                      onClick={() => setStandardDraft(questionnaire?.scoringStandard || "")}
+                    >
+                      <Edit2 className="w-4 h-4 mr-2" />
+                      编辑评分标准
+                    </Button>
+                  </DialogTrigger>
+                  <DialogContent className="max-w-lg">
+                    <DialogHeader>
+                      <DialogTitle>编辑评分标准</DialogTitle>
+                      <DialogDescription>
+                        保存后将根据评分标准文本自动重新解析并同步评分维度（覆盖现有维度）。
+                        {audioResponseCount > 0 && (
+                          <span className="text-red-600">
+                            {" "}该问卷已有 {audioResponseCount} 份作答，保存将一并清空。
+                          </span>
+                        )}
+                      </DialogDescription>
+                    </DialogHeader>
+                    <div className="space-y-4">
+                      <div className="space-y-2">
+                        <Label htmlFor="standardDraft">评分标准</Label>
+                        <Textarea
+                          id="standardDraft"
+                          rows={8}
+                          placeholder="每行/分号分隔一个维度，如：情绪表达：是否自然；音质清晰度；整体自然度..."
+                          value={standardDraft}
+                          onChange={(e) => setStandardDraft(e.target.value)}
+                        />
+                      </div>
+                      <div className="flex justify-end gap-2">
+                        <Button variant="outline" onClick={() => setIsStandardDialogOpen(false)}>
+                          取消
+                        </Button>
+                        <Button
+                          className="bg-blue-600 hover:bg-blue-700"
+                          disabled={isUpdatingStandard}
+                          onClick={handleSaveStandard}
+                        >
+                          {isUpdatingStandard ? "保存中..." : "保存并重新解析"}
+                        </Button>
+                      </div>
+                    </div>
+                  </DialogContent>
+                </Dialog>
+                <Dialog open={isDimensionDialogOpen} onOpenChange={setIsDimensionDialogOpen}>
                 <DialogTrigger asChild>
                   <Button
                     className="bg-blue-600 hover:bg-blue-700"
@@ -562,6 +715,7 @@ export default function AdminQuestionnaireDetail() {
                   </div>
                 </DialogContent>
               </Dialog>
+              </div>
             </div>
 
             {/* Dimensions List */}
@@ -849,7 +1003,18 @@ export default function AdminQuestionnaireDetail() {
 
           {/* Responses Tab */}
           <TabsContent value="responses" className="space-y-6">
-            <h2 className="text-2xl font-bold text-slate-900">答卷详情</h2>
+            <div className="flex items-center justify-between">
+              <h2 className="text-2xl font-bold text-slate-900">答卷详情</h2>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleExportExcel}
+                disabled={!responses || responses.length === 0}
+              >
+                <Download className="w-4 h-4 mr-2" />
+                导出 Excel
+              </Button>
+            </div>
 
             {!responses || responses.length === 0 ? (
               <Card>

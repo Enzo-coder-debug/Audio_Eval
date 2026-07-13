@@ -8,7 +8,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Upload, Plus, Music, FileText, LogOut, X, Loader2, Trash2, Copy } from "lucide-react";
+import { Upload, Plus, Music, FileText, LogOut, X, Loader2, Trash2, Copy, Pencil, BarChart3 } from "lucide-react";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
 
@@ -25,26 +25,18 @@ export default function AdminDashboard() {
   const [title, setTitle] = useState("");
   const [evaluationCopywriting, setEvaluationCopywriting] = useState("");
   const [scoringStandard, setScoringStandard] = useState("");
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
 
   // Fetch admin questionnaires
   const { data: questionnaires, isLoading: isLoadingQuestionnaires, refetch: refetchQuestionnaires } = 
     trpc.questionnaire.listAdmin.useQuery();
 
-  // Handle audio upload mutation
-  const { mutate: uploadAudio, isPending: isUploadingAudio } = trpc.audio.upload.useMutation({
-    onSuccess: (data) => {
-      toast.success(`上传成功！已创建 ${data.blindTestPairsCount} 个对比配对，${data.dimensionsCount} 个评分维度`);
-      setIsUploadDialogOpen(false);
-      setAudioItems([]);
-      setTitle("");
-      setEvaluationCopywriting("");
-      setScoringStandard("");
-      refetchQuestionnaires();
-    },
-    onError: (error) => {
-      toast.error(error.message || "上传失败，请重试");
-    },
-  });
+  // 分片串行上传所需的三个接口(在 handleUpload 中按序 mutateAsync 调用):
+  // 1) 先只建问卷+评分维度  2) 逐个音频追加(每次请求体仅含单个文件,避免网关 413)  3) 全部传完再生成配对。
+  const createQuestionnaire = trpc.audio.createQuestionnaire.useMutation();
+  const addAudioToQuestionnaire = trpc.audio.addToQuestionnaire.useMutation();
+  const generatePairs = trpc.audio.generatePairs.useMutation();
 
   // 删除问卷
   const { mutate: deleteQuestionnaire, isPending: isDeleting } = trpc.questionnaire.delete.useMutation({
@@ -78,6 +70,29 @@ export default function AdminDashboard() {
     if (window.confirm(`确定复制问卷「${title}」吗？将创建一份草稿副本。`)) {
       duplicateQuestionnaire({ id });
     }
+  };
+
+  // 重命名问卷:创建后仍可修改问卷名
+  const { mutate: updateQuestionnaire, isPending: isRenaming } = trpc.questionnaire.update.useMutation({
+    onSuccess: () => {
+      toast.success("问卷名称已更新");
+      refetchQuestionnaires();
+    },
+    onError: (error) => {
+      toast.error(error.message || "重命名失败，请重试");
+    },
+  });
+
+  const handleRename = (id: number, currentTitle: string) => {
+    const next = window.prompt("请输入新的问卷名称", currentTitle);
+    if (next === null) return; // 取消
+    const trimmed = next.trim();
+    if (!trimmed) {
+      toast.error("问卷名称不能为空");
+      return;
+    }
+    if (trimmed === currentTitle) return; // 未改动
+    updateQuestionnaire({ id, title: trimmed });
   };
 
   // Add files to the list
@@ -114,42 +129,66 @@ export default function AdminDashboard() {
       toast.error("请为每个音频指定所属模型");
       return;
     }
-    if (!evaluationCopywriting || evaluationCopywriting.length < 10) {
-      toast.error("请填写测评背景（至少10个字符）");
+    if (!evaluationCopywriting.trim()) {
+      toast.error("请填写测评背景");
       return;
     }
-    if (!scoringStandard || scoringStandard.length < 10) {
-      toast.error("请填写评分标准（至少10个字符）");
+    if (!scoringStandard.trim()) {
+      toast.error("请填写评分标准");
       return;
     }
 
+    // 分片串行上传:每次请求体只含单个音频,避免网关(JDOS ingress 默认 1MB)对大请求体返回 413。
+    // 流程:① 只建问卷+评分维度 → ② 逐个音频 addToQuestionnaire → ③ 全部传完再 generatePairs。
+    setIsUploading(true);
+    setUploadProgress({ done: 0, total: audioItems.length });
     try {
-      const audios = await Promise.all(
-        audioItems.map(async (item) => {
-          const fileData = await item.file.arrayBuffer();
-          let mimeType: "audio/mpeg" | "audio/wav" | "audio/mp4" = "audio/mpeg";
-          if (item.file.type === "audio/wav") mimeType = "audio/wav";
-          else if (item.file.type === "audio/mp4" || item.file.name.endsWith(".m4a")) mimeType = "audio/mp4";
-          
-          return {
-            fileName: item.file.name,
-            fileData: new Uint8Array(fileData),
-            mimeType,
-            fileSizeBytes: item.file.size,
-            modelName: item.modelName.trim(),
-          };
-        })
-      );
-
-      uploadAudio({
+      // ① 先建问卷(不含音频),拿到 questionnaireId
+      const { questionnaireId, dimensionsCount } = await createQuestionnaire.mutateAsync({
         title: title.trim(),
-        audios,
         evaluationCopywriting,
         scoringStandard,
       });
-    } catch (error) {
-      toast.error("文件读取失败");
+
+      // ② 逐个音频串行上传(单文件请求体远小于 1MB 上限)
+      for (let i = 0; i < audioItems.length; i++) {
+        const item = audioItems[i];
+        const fileData = await item.file.arrayBuffer();
+        let mimeType: "audio/mpeg" | "audio/wav" | "audio/mp4" = "audio/mpeg";
+        if (item.file.type === "audio/wav") mimeType = "audio/wav";
+        else if (item.file.type === "audio/mp4" || item.file.name.endsWith(".m4a")) mimeType = "audio/mp4";
+
+        await addAudioToQuestionnaire.mutateAsync({
+          questionnaireId,
+          audios: [
+            {
+              fileName: item.file.name,
+              fileData: new Uint8Array(fileData),
+              mimeType,
+              fileSizeBytes: item.file.size,
+              modelName: item.modelName.trim(),
+            },
+          ],
+        });
+        setUploadProgress({ done: i + 1, total: audioItems.length });
+      }
+
+      // ③ 全部音频上传完成�统一生成盲测配对
+      const { pairsCount } = await generatePairs.mutateAsync({ questionnaireId });
+
+      toast.success(`上传成功！已创建 ${pairsCount} 个对比配对，${dimensionsCount} 个评分维度`);
+      setIsUploadDialogOpen(false);
+      setAudioItems([]);
+      setTitle("");
+      setEvaluationCopywriting("");
+      setScoringStandard("");
+      refetchQuestionnaires();
+    } catch (error: any) {
+      toast.error(error?.message || "上传失败，请重试");
       console.error(error);
+    } finally {
+      setIsUploading(false);
+    setUploadProgress(null);
     }
   };
 
@@ -169,6 +208,14 @@ export default function AdminDashboard() {
           </div>
           <div className="flex items-center gap-4">
             <span className="text-sm text-slate-600">{user?.name}</span>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setLocation("/admin/analytics")}
+            >
+              <BarChart3 className="w-4 h-4 mr-2" />
+              跨问卷分析
+            </Button>
             <Button
               variant="ghost"
               size="sm"
@@ -310,12 +357,14 @@ export default function AdminDashboard() {
                       <Button
                         className="bg-blue-600 hover:bg-blue-700"
                         onClick={handleUpload}
-                        disabled={isUploadingAudio}
+                        disabled={isUploading}
                       >
-                        {isUploadingAudio ? (
+                        {isUploading ? (
                           <>
                             <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                            上传中...
+                            {uploadProgress
+                              ? `上传中 ${uploadProgress.done}/${uploadProgress.total}...`
+                              : "上传中..."}
                           </>
                         ) : (
                           "上传并创建盲测"
@@ -400,6 +449,16 @@ export default function AdminDashboard() {
                           onClick={() => setLocation(`/admin/questionnaire/${q.id}`)}
                         >
                           查看详情
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => handleRename(q.id, q.title)}
+                          disabled={isRenaming}
+                          className="ml-2"
+                        >
+                          <Pencil className="w-4 h-4 mr-1" />
+                          重命名
                         </Button>
                         <Button
                           variant="outline"

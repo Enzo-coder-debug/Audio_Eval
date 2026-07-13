@@ -74,7 +74,7 @@ export function buildBlindTestPairs(
 
   const rawPairs: { leftId: number; rightId: number }[] = [];
   // 组内不同模型两两配对
-  for (const list of groups.values()) {
+  for (const list of Array.from(groups.values())) {
     for (let i = 0; i < list.length; i++) {
       for (let j = i + 1; j < list.length; j++) {
         if (list[i].modelName === list[j].modelName) continue; // 同模型不比较
@@ -197,8 +197,8 @@ export const appRouter = router({
           modelName: z.string().min(1), // New field for model name
           groupLabel: z.string().optional(), // 组别(可选),同组不同模型两两配对
         })),
-        evaluationCopywriting: z.string().min(10),
-        scoringStandard: z.string().min(10),
+        evaluationCopywriting: z.string(),
+        scoringStandard: z.string(),
       }))
       .mutation(async ({ input, ctx }) => {
         try {
@@ -306,6 +306,44 @@ export const appRouter = router({
             cause: error,
           });
         }
+      }),
+
+    /**
+     * 仅创建盲测问卷(含评分维度),不上传任何音频。
+     * 用于前端"分片串行上传"流程:先建问卷拿到 id,再逐个音频调用 addToQuestionnaire,
+     * 避免一次性把所有音频�进单个请求体导致网关(JDOS ingress 默认 1MB)返回 413。
+     */
+    createQuestionnaire: adminProcedure
+      .input(z.object({
+        title: z.string().min(1, "请填写问卷名称"),
+        evaluationCopywriting: z.string(),
+        scoringStandard: z.string(),
+      }))
+      .mutation(async ({ input, ctx }) => {
+        const qResult = await db.createQuestionnaire({
+          creatorId: ctx.user.id,
+          title: input.title,
+          description: "",
+          evaluationCopywriting: input.evaluationCopywriting,
+          scoringStandard: input.scoringStandard,
+          status: "draft",
+          audioFileId: null,
+          audioUrl: null,
+        });
+        const questionnaireId = getInsertId(qResult);
+
+        // 根据评分标准文本自动解析并写入评分维度,与 upload 接口保持一致。
+        const parsedDimensions = parseScoringStandardToDimensions(input.scoringStandard);
+        await db.createEvaluationDimensions(
+          parsedDimensions.map((d, idx) => ({
+            questionnaireId,
+            dimensionName: d.dimensionName,
+            description: d.description,
+            orderIndex: idx,
+          }))
+        );
+
+        return { questionnaireId, dimensionsCount: parsedDimensions.length };
       }),
 
     /**
@@ -652,6 +690,8 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
         id: z.number(),
         title: z.string().optional(),
         description: z.string().optional(),
+        evaluationCopywriting: z.string().optional(),
+        scoringStandard: z.string().optional(),
         status: z.enum(["draft", "published", "offline"]).optional(),
         validFrom: z.date().optional(),
         validUntil: z.date().optional(),
@@ -665,6 +705,8 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
         const updates: any = {};
         if (input.title) updates.title = input.title;
         if (input.description) updates.description = input.description;
+        if (input.evaluationCopywriting !== undefined) updates.evaluationCopywriting = input.evaluationCopywriting;
+        if (input.scoringStandard !== undefined) updates.scoringStandard = input.scoringStandard;
         if (input.status) {
           updates.status = input.status;
           if (input.status === "published") {
@@ -680,7 +722,35 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
         if (input.validUntil) updates.validUntil = input.validUntil;
 
         await db.updateQuestionnaire(input.id, updates);
-        return { success: true };
+
+        // 评分标准文本变更时,自动重新解析并同步评分维度(删旧建新)。
+        // 说明:评分标准变更意味着评价口径改变,历史维度与已产生的作答均已失效,
+        // 因此若已存在作答记录,一并清理,避免旧作答引用已删除的维度导致数据错位。
+        let dimensionsUpdated = false;
+        let dimensionsCount: number | undefined;
+        if (
+          input.scoringStandard !== undefined &&
+          input.scoringStandard !== questionnaire.scoringStandard
+        ) {
+          const respCount = await db.countResponsesByQuestionnaire(input.id);
+          if (respCount > 0) {
+            await db.deleteResponsesByQuestionnaire(input.id);
+          }
+          await db.deleteEvaluationDimensionsByQuestionnaire(input.id);
+          const parsedDimensions = parseScoringStandardToDimensions(input.scoringStandard);
+          await db.createEvaluationDimensions(
+            parsedDimensions.map((d, idx) => ({
+              questionnaireId: input.id,
+              dimensionName: d.dimensionName,
+              description: d.description,
+              orderIndex: idx,
+            }))
+          );
+          dimensionsUpdated = true;
+          dimensionsCount = parsedDimensions.length;
+        }
+
+        return { success: true, dimensionsUpdated, dimensionsCount };
       }),
 
     /**
@@ -1224,6 +1294,116 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
         return {
           totalResponses: responsesList.length,
           totalJudgments: allAnswers.filter(a => a.blindTestChoice).length,
+          comparisons,
+        };
+      }),
+
+    /**
+     * 跨问卷聚合统计:选中多个问卷,把它们的 blindTestChoice 按"模型对比 × 评分维度名"
+     * 跨问卷合并聚合。不同问卷的维度 id 不同,故按 dimensionName 归并;模型名跨问卷天然按名字对齐。
+     * 计算方式与单问卷 aggregate 一致(GSB / Wilson / 双侧二项检验)。
+     */
+    aggregateMulti: adminProcedure
+      .input(z.object({ questionnaireIds: z.array(z.number()).min(1) }))
+      .query(async ({ input, ctx }) => {
+        // 聚合键:`${dimensionName}|${modelA}__VS__${modelB}`(modelA/B 按字典序规范化)
+        type Cell = { modelA: string; modelB: string; dimensionName: string; aWins: number; bWins: number; ties: number };
+        const cells = new Map<string, Cell>();
+        let totalResponses = 0;
+        let totalJudgments = 0;
+        const includedQuestionnaires: { id: number; title: string }[] = [];
+
+        for (const qid of input.questionnaireIds) {
+          const questionnaire = await db.getQuestionnaireById(qid);
+          // 仅统计当前管理员自己的问卷,无权/不存在的静默跳过
+          if (!questionnaire || questionnaire.creatorId !== ctx.user.id) continue;
+          includedQuestionnaires.push({ id: questionnaire.id, title: questionnaire.title });
+
+          const pairs = await db.getBlindTestPairsByQuestionnaire(qid);
+          const pairMeta = new Map<number, { left: string; right: string }>();
+          for (const p of pairs) {
+            const leftAudio = await db.getAudioFileById(p.leftAudioFileId);
+            const rightAudio = await db.getAudioFileById(p.rightAudioFileId);
+            pairMeta.set(p.id, {
+              left: leftAudio?.modelName || "左侧模型",
+              right: rightAudio?.modelName || "右侧模型",
+            });
+          }
+
+          const dimensions = await db.getEvaluationDimensionsByQuestionnaire(qid);
+          const dimNameMap = new Map<number, string>(dimensions.map(d => [d.id, d.dimensionName]));
+
+          const responsesList = await db.getQuestionnaireResponses(qid);
+          totalResponses += responsesList.length;
+          for (const r of responsesList) {
+            const answers = await db.getAnswersByResponse(r.id);
+            for (const a of answers) {
+              if (!a.blindTestPairId || !a.blindTestChoice) continue;
+              totalJudgments++;
+              const meta = pairMeta.get(a.blindTestPairId);
+              if (!meta || meta.left === meta.right) continue;
+
+              const [modelA, modelB] = meta.left < meta.right ? [meta.left, meta.right] : [meta.right, meta.left];
+              const leftIsA = meta.left === modelA;
+              const dimName = a.evaluationDimensionId
+                ? dimNameMap.get(a.evaluationDimensionId) || `维度#${a.evaluationDimensionId}`
+                : "整体";
+              const key = `${dimName}|${modelA}__VS__${modelB}`;
+              if (!cells.has(key)) {
+                cells.set(key, { modelA, modelB, dimensionName: dimName, aWins: 0, bWins: 0, ties: 0 });
+              }
+              const cell = cells.get(key)!;
+              if (a.blindTestChoice === "same") {
+                cell.ties++;
+              } else {
+                const leftWon = a.blindTestChoice === "left_better";
+                const aWon = leftIsA ? leftWon : !leftWon;
+                if (aWon) cell.aWins++;
+                else cell.bWins++;
+              }
+            }
+          }
+        }
+
+        const comparisons = Array.from(cells.values()).map(cell => {
+          const total = cell.aWins + cell.bWins + cell.ties;
+          const decisive = cell.aWins + cell.bWins;
+          const aWinRate = total > 0 ? cell.aWins / total : 0;
+          const bWinRate = total > 0 ? cell.bWins / total : 0;
+          const tieRate = total > 0 ? cell.ties / total : 0;
+          const gsbScore = total > 0 ? (cell.aWins - cell.bWins) / total : 0;
+          const wilson = wilsonInterval(cell.aWins, decisive, 1.96);
+          const pValue = twoSidedBinomialTest(cell.aWins, decisive, 0.5);
+          const significant = decisive > 0 && pValue < 0.05;
+          let winner: string | null = null;
+          if (significant) winner = cell.aWins > cell.bWins ? cell.modelA : cell.modelB;
+
+          return {
+            dimensionId: 0,
+            dimensionName: cell.dimensionName,
+            modelA: cell.modelA,
+            modelB: cell.modelB,
+            aWins: cell.aWins,
+            bWins: cell.bWins,
+            ties: cell.ties,
+            total,
+            aWinRate,
+            bWinRate,
+            tieRate,
+            gsbScore,
+            confidenceLevel: decisive > 0 ? 1 - pValue : 0,
+            pValue,
+            wilsonLower: wilson.lower,
+            wilsonUpper: wilson.upper,
+            significant,
+            winner,
+          };
+        });
+
+        return {
+          totalResponses,
+          totalJudgments,
+          includedQuestionnaires,
           comparisons,
         };
       }),

@@ -426,6 +426,14 @@ export async function deleteEvaluationDimension(id: number) {
     .where(eq(evaluationDimensions.id, id));
 }
 
+// 删除某问卷的全部评分维度(改评分标准重新解析维度前调用)。
+export async function deleteEvaluationDimensionsByQuestionnaire(questionnaireId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  return db.delete(evaluationDimensions)
+    .where(eq(evaluationDimensions.questionnaireId, questionnaireId));
+}
+
 /**
  * 盲测音频编辑相关操作
  * 说明:音频(audioFiles)与问卷(questionnaires)之间没有直接外键,

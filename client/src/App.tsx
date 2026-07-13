@@ -13,6 +13,7 @@ import AnswerQuestionnaire from "./pages/AnswerQuestionnaire";
 import ResponseDetail from "./pages/ResponseDetail";
 import PublicQuestionnaire from "./pages/PublicQuestionnaire";
 import QuestionnaireAnalytics from "./pages/QuestionnaireAnalytics";
+import MultiQuestionnaireAnalytics from "./pages/MultiQuestionnaireAnalytics";
 import AdminLogin from "./pages/AdminLogin";
 import { useAuth } from "./_core/hooks/useAuth";
 import { Spinner } from "@/components/ui/spinner";
@@ -41,6 +42,7 @@ function Router() {
           <Route path={"/admin/dashboard"} component={AdminDashboard} />
       <Route path={"/admin/questionnaire/:id"} component={AdminQuestionnaireDetail} />
       <Route path="/admin/questionnaire/:id/analytics" component={QuestionnaireAnalytics} />
+          <Route path="/admin/analytics" component={MultiQuestionnaireAnalytics} />
         </>
       )}
       {/* User routes */}
