@@ -960,6 +960,14 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
 
         const visitorIp = ((ctx.req.headers["x-forwarded-for"] as string) || "").split(",")[0] || ctx.req.socket?.remoteAddress || "unknown";
 
+        // 复用同 IP 未提交的 in_progress 记录,避免每次进入都新建脏数据
+        const existing = await db.findInProgressResponse(input.questionnaireId, visitorIp);
+        if (existing) {
+          // 更新访客姓名(可能本次填写了新名字),继续沿用该记录
+          await db.updateResponse(existing.id, { visitorName: input.visitorName });
+          return { responseId: existing.id };
+        }
+
         const result = await db.createAnonymousResponse({
           questionnaireId: input.questionnaireId as number,
           visitorIp,
@@ -1050,6 +1058,15 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
           status: "submitted",
           submittedAt: new Date(),
         });
+
+        // 清理同问卷、同 IP 的其他残留 in_progress 记录(避免"填写进展/答卷详情"出现脏数据)
+        if (response.visitorIp && response.questionnaireId) {
+          await db.deleteStaleInProgressResponses(
+            response.questionnaireId,
+            response.visitorIp,
+            input.responseId,
+          );
+        }
 
         return { success: true };
       }),
@@ -1193,22 +1210,36 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
      * 给出差异显著性(置信度),用于自动化的模型优劣结论。
      */
     aggregate: adminProcedure
-      .input(z.object({ questionnaireId: z.number() }))
+      .input(z.object({
+        questionnaireId: z.number(),
+        // 需要剔除的样本(盲测配对)id 列表。用于剔除音频有问题的样本后重新分析。
+        excludePairIds: z.array(z.number()).optional(),
+      }))
       .query(async ({ input, ctx }) => {
         const questionnaire = await db.getQuestionnaireById(input.questionnaireId);
         if (!questionnaire || questionnaire.creatorId !== ctx.user.id) {
           throw new TRPCError({ code: "FORBIDDEN" });
         }
 
-        // 配对信息:pairId -> { left, right } 模型名
+        const excludeSet = new Set(input.excludePairIds || []);
+
+        // 配对信息:pairId -> { left, right } 模型名;同时构建前端筛选面板用的 pairs 列表(含组别)。
         const pairs = await db.getBlindTestPairsByQuestionnaire(input.questionnaireId);
         const pairMeta = new Map<number, { left: string; right: string }>();
+        const pairList: { id: number; pairIndex: number; leftModelName: string; rightModelName: string; groupLabel: string | null }[] = [];
         for (const p of pairs) {
           const leftAudio = await db.getAudioFileById(p.leftAudioFileId);
-          const rightAudio = await db.getAudioFileById(p.rightAudioFileId);
+      const rightAudio = await db.getAudioFileById(p.rightAudioFileId);
           pairMeta.set(p.id, {
             left: leftAudio?.modelName || "左侧模型",
             right: rightAudio?.modelName || "右侧模型",
+          });
+          pairList.push({
+            id: p.id,
+            pairIndex: p.pairIndex,
+            leftModelName: leftAudio?.modelName || "左侧模型",
+            rightModelName: rightAudio?.modelName || "右侧模型",
+            groupLabel: leftAudio?.groupLabel ?? rightAudio?.groupLabel ?? null,
           });
         }
 
@@ -1229,6 +1260,7 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
 
         for (const a of allAnswers) {
           if (!a.blindTestPairId || !a.blindTestChoice) continue;
+          if (excludeSet.has(a.blindTestPairId)) continue; // 被剔除的样本不参与聚合
           const meta = pairMeta.get(a.blindTestPairId);
           if (!meta) continue;
           if (meta.left === meta.right) continue; // 同模型不比
@@ -1293,8 +1325,9 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
 
         return {
           totalResponses: responsesList.length,
-          totalJudgments: allAnswers.filter(a => a.blindTestChoice).length,
+          totalJudgments: allAnswers.filter(a => a.blindTestChoice && !excludeSet.has(a.blindTestPairId)).length,
           comparisons,
+          pairs: pairList,
         };
       }),
 

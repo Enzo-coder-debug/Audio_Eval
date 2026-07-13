@@ -8,7 +8,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Upload, Plus, Music, FileText, LogOut, X, Loader2, Trash2, Copy, Pencil, BarChart3 } from "lucide-react";
+import { Upload, Plus, Music, FileText, LogOut, X, Loader2, Trash2, Copy, Pencil } from "lucide-react";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
 
@@ -208,6 +208,7 @@ export default function AdminDashboard() {
           </div>
           <div className="flex items-center gap-4">
             <span className="text-sm text-slate-600">{user?.name}</span>
+            {/* 跨问卷分析入口暂时隐藏(保留代码与路由,后续需要时恢复)
             <Button
               variant="outline"
               size="sm"
@@ -216,6 +217,7 @@ export default function AdminDashboard() {
               <BarChart3 className="w-4 h-4 mr-2" />
               跨问卷分析
             </Button>
+            */}
             <Button
               variant="ghost"
               size="sm"

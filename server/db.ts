@@ -324,6 +324,42 @@ export async function updateResponse(id: number, updates: Partial<typeof respons
     .where(eq(responses.id, id));
 }
 
+// 查找同问卷、同 IP 且仍处于 in_progress 的记录(用于复用,避免每次进入都新建脏数据)。
+export async function findInProgressResponse(questionnaireId: number, visitorIp: string) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const rows = await db.select().from(responses)
+    .where(and(
+      eq(responses.questionnaireId, questionnaireId),
+      eq(responses.visitorIp, visitorIp),
+      eq(responses.status, "in_progress"),
+    ))
+    .orderBy(desc(responses.id));
+  return rows[0] || null;
+}
+
+// 清理同问卷、同 IP 的其他残留 in_progress 记录(保留 keepResponseId),先删其 answers 再删 response。
+export async function deleteStaleInProgressResponses(
+  questionnaireId: number,
+  visitorIp: string,
+  keepResponseId: number,
+) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const rows = await db.select({ id: responses.id }).from(responses)
+    .where(and(
+      eq(responses.questionnaireId, questionnaireId),
+      eq(responses.visitorIp, visitorIp),
+      eq(responses.status, "in_progress"),
+    ));
+  const staleIds = rows.map(r => r.id).filter(id => id !== keepResponseId);
+  for (const id of staleIds) {
+    await db.delete(answers).where(eq(answers.responseId, id));
+    await db.delete(responses).where(eq(responses.id, id));
+  }
+  return staleIds.length;
+}
+
 /**
  * Answer operations
  */

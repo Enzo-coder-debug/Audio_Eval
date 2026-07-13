@@ -1,10 +1,12 @@
 import { useParams, useLocation } from "wouter";
+import { useState } from "react";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Checkbox } from "@/components/ui/checkbox";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, Cell } from "recharts";
-import { ArrowLeft, Loader2, TrendingUp } from "lucide-react";
+import { ArrowLeft, Loader2, TrendingUp, Filter } from "lucide-react";
 
 // 置信度徽标:根据显著性与置信度着色
 function ConfidenceBadge({ significant, confidence }: { significant: boolean; confidence: number }) {
@@ -28,12 +30,21 @@ export default function QuestionnaireAnalytics() {
   const [, setLocation] = useLocation();
   const questionnaireId = parseInt(id || "0");
 
+  // 被剔除的样本(盲测配对)ID 集合,勾选后不参与聚合分析
+  const [excludePairIds, setExcludePairIds] = useState<number[]>([]);
+
+  const togglePair = (pairId: number) => {
+    setExcludePairIds((prev) =>
+      prev.includes(pairId) ? prev.filter((x) => x !== pairId) : [...prev, pairId]
+    );
+  };
+
   const { data, isLoading } = trpc.stats.aggregate.useQuery(
-    { questionnaireId },
+    { questionnaireId, excludePairIds },
     { enabled: !!questionnaireId }
   );
 
-  if (isLoading) {
+  if (isLoading && !data) {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <Loader2 className="w-8 h-8 animate-spin" />
@@ -42,6 +53,45 @@ export default function QuestionnaireAnalytics() {
   }
 
   const comparisons = data?.comparisons || [];
+  const pairs = data?.pairs || [];
+
+  // 样本剔除面板:勾选后该样本(盲测配对)不参与聚合
+  const filterPanel = pairs.length > 0 && (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Filter className="w-5 h-5" />
+          样本筛选（剔除有问题的样本后重新分析）
+        </CardTitle>
+        <CardDescription>
+          勾选需要剔除的样本，被剔除的样本不计入下方聚合统计。当前已剔除 {excludePairIds.length} 个。
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          {pairs.map((p) => (
+            <label
+              key={p.id}
+              className="flex items-start gap-2 p-2 rounded border border-slate-200 hover:bg-slate-50 cursor-pointer"
+            >
+              <Checkbox
+                checked={excludePairIds.includes(p.id)}
+                onCheckedChange={() => togglePair(p.id)}
+              />
+              <span className="text-sm text-slate-700">
+                样本 #{p.pairIndex + 1}
+                {p.groupLabel ? `（${p.groupLabel}）` : ""}
+                <br />
+                <span className="text-xs text-slate-500">
+                  {p.leftModelName} vs {p.rightModelName}
+                </span>
+              </span>
+            </label>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
+  );
 
   if (comparisons.length === 0) {
     return (
@@ -51,9 +101,10 @@ export default function QuestionnaireAnalytics() {
             <ArrowLeft className="w-4 h-4 mr-2" />
             返回问卷
           </Button>
+          {filterPanel}
           <Card>
             <CardContent className="pt-12 text-center">
-              <p className="text-slate-600">暂无可分析的盲测数据（需要有人完成答卷后才能生成对比结论）</p>
+              <p className="text-slate-600">暂无可分析的盲测数据（需要有人完成答卷后才能生成对比结论，或当前剔除条件下无剩余样本）</p>
             </CardContent>
           </Card>
         </div>
@@ -84,6 +135,8 @@ export default function QuestionnaireAnalytics() {
             返回问卷
           </Button>
         </div>
+
+        {filterPanel}
 
         {/* GSB 净胜分图 */}
         <Card>
