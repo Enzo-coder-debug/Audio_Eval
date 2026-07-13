@@ -1,5 +1,5 @@
 import { useParams, useLocation } from "wouter";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -30,19 +30,55 @@ export default function QuestionnaireAnalytics() {
   const [, setLocation] = useLocation();
   const questionnaireId = parseInt(id || "0");
 
-  // 被剔除的样本(盲测配对)ID 集合,勾选后不参与聚合分析
-  const [excludePairIds, setExcludePairIds] = useState<number[]>([]);
+  // 正向选中的答卷(测评人)ID 集合,只有选中的答卷才参与聚合分析。
+  // null 表示"尚未初始化"(数据到达后自动全选);空数组表示"全不选"。
+  const [selectedIds, setSelectedIds] = useState<number[] | null>(null);
 
-  const togglePair = (pairId: number) => {
-    setExcludePairIds((prev) =>
-      prev.includes(pairId) ? prev.filter((x) => x !== pairId) : [...prev, pairId]
-    );
-  };
-
+  // 后端语义:includeResponseIds 为空/undefined => 全选。
+  // 故:未初始化(null) 或 已全选时传 undefined;部分选中传选中 id;全不选传 [-1](必不匹配,得到空结果)。
   const { data, isLoading } = trpc.stats.aggregate.useQuery(
-    { questionnaireId, excludePairIds },
+    {
+      questionnaireId,
+      includeResponseIds:
+        selectedIds === null
+          ? undefined
+          : selectedIds.length === 0
+            ? [-1]
+            : selectedIds,
+    },
     { enabled: !!questionnaireId }
   );
+
+  const responseSamples = data?.responseSamples || [];
+
+  // 数据首次到达时,默认全选所有答卷
+  useEffect(() => {
+    if (selectedIds === null && responseSamples.length > 0) {
+      setSelectedIds(responseSamples.map((r) => r.id));
+    }
+  }, [selectedIds, responseSamples]);
+
+  const toggleResponse = (rid: number) => {
+    setSelectedIds((prev) => {
+      const base = prev ?? responseSamples.map((r) => r.id);
+      return base.includes(rid) ? base.filter((x) => x !== rid) : [...base, rid];
+    });
+  };
+
+  const allSelected =
+    responseSamples.length > 0 &&
+    (selectedIds === null || selectedIds.length === responseSamples.length);
+
+  const toggleSelectAll = () => {
+    if (allSelected) {
+      setSelectedIds([]);
+    } else {
+      setSelectedIds(responseSamples.map((r) => r.id));
+    }
+  };
+
+  const selectedCount =
+    selectedIds === null ? responseSamples.length : selectedIds.length;
 
   if (isLoading && !data) {
     return (
@@ -53,37 +89,44 @@ export default function QuestionnaireAnalytics() {
   }
 
   const comparisons = data?.comparisons || [];
-  const pairs = data?.pairs || [];
 
-  // 样本剔除面板:勾选后该样本(盲测配对)不参与聚合
-  const filterPanel = pairs.length > 0 && (
+  // 样本筛选面板:以测评人(每份提交的答卷)为一份样本,勾选=纳入分析(正向选中),默认全选
+  const isSelected = (rid: number) =>
+    selectedIds === null ? true : selectedIds.includes(rid);
+
+  const filterPanel = responseSamples.length > 0 && (
     <Card>
       <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <Filter className="w-5 h-5" />
-          样本筛选（剔除有问题的样本后重新分析）
-        </CardTitle>
+        <div className="flex items-center justify-between">
+          <CardTitle className="flex items-center gap-2">
+            <Filter className="w-5 h-5" />
+            样本筛选（选中要纳入分析的测评人）
+          </CardTitle>
+          <Button variant="outline" size="sm" onClick={toggleSelectAll}>
+            {allSelected ? "取消全选" : "全选"}
+          </Button>
+        </div>
         <CardDescription>
-          勾选需要剔除的样本，被剔除的样本不计入下方聚合统计。当前已剔除 {excludePairIds.length} 个。
+          每份提交的问卷为一份样本（按测评人）。勾选表示纳入下方聚合统计。当前已选中 {selectedCount} / {responseSamples.length} 份。
         </CardDescription>
       </CardHeader>
       <CardContent>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-          {pairs.map((p) => (
+          {responseSamples.map((r) => (
             <label
-              key={p.id}
+              key={r.id}
               className="flex items-start gap-2 p-2 rounded border border-slate-200 hover:bg-slate-50 cursor-pointer"
             >
               <Checkbox
-                checked={excludePairIds.includes(p.id)}
-                onCheckedChange={() => togglePair(p.id)}
+                checked={isSelected(r.id)}
+                onCheckedChange={() => toggleResponse(r.id)}
               />
               <span className="text-sm text-slate-700">
-                样本 #{p.pairIndex + 1}
-                {p.groupLabel ? `（${p.groupLabel}）` : ""}
+                {r.visitorName}
                 <br />
                 <span className="text-xs text-slate-500">
-                  {p.leftModelName} vs {p.rightModelName}
+                  {r.judgmentCount} 次判断
+                  {r.submittedAt ? `｜${new Date(r.submittedAt).toLocaleString()}` : ""}
                 </span>
               </span>
             </label>
@@ -104,7 +147,7 @@ export default function QuestionnaireAnalytics() {
           {filterPanel}
           <Card>
             <CardContent className="pt-12 text-center">
-              <p className="text-slate-600">暂无可分析的盲测数据（需要有人完成答卷后才能生成对比结论，或当前剔除条件下无剩余样本）</p>
+              <p className="text-slate-600">暂无可分析的盲测数据（需要有人完成答卷后才能生成对比结论，或当前所选样本无有效判断）</p>
             </CardContent>
           </Card>
         </div>

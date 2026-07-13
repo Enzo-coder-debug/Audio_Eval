@@ -1212,8 +1212,9 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
     aggregate: adminProcedure
       .input(z.object({
         questionnaireId: z.number(),
-        // 需要剔除的样本(盲测配对)id 列表。用于剔除音频有问题的样本后重新分析。
-        excludePairIds: z.array(z.number()).optional(),
+        // 需要纳入分析的样本(答卷)id 列表。样本粒度为"测评人/每份提交的问卷"。
+        // 传 undefined 表示全选(纳入全部已提交答卷);传具体数组则只统计选中的答卷。
+        includeResponseIds: z.array(z.number()).optional(),
       }))
       .query(async ({ input, ctx }) => {
         const questionnaire = await db.getQuestionnaireById(input.questionnaireId);
@@ -1221,37 +1222,50 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
           throw new TRPCError({ code: "FORBIDDEN" });
         }
 
-        const excludeSet = new Set(input.excludePairIds || []);
-
-        // 配对信息:pairId -> { left, right } 模型名;同时构建前端筛选面板用的 pairs 列表(含组别)。
+        // 配对信息:pairId -> { left, right } 模型名(用于把 left/right 选择映射到模型对比)。
         const pairs = await db.getBlindTestPairsByQuestionnaire(input.questionnaireId);
         const pairMeta = new Map<number, { left: string; right: string }>();
-        const pairList: { id: number; pairIndex: number; leftModelName: string; rightModelName: string; groupLabel: string | null }[] = [];
         for (const p of pairs) {
           const leftAudio = await db.getAudioFileById(p.leftAudioFileId);
-      const rightAudio = await db.getAudioFileById(p.rightAudioFileId);
+          const rightAudio = await db.getAudioFileById(p.rightAudioFileId);
           pairMeta.set(p.id, {
             left: leftAudio?.modelName || "左侧模型",
             right: rightAudio?.modelName || "右侧模型",
-          });
-          pairList.push({
-            id: p.id,
-            pairIndex: p.pairIndex,
-            leftModelName: leftAudio?.modelName || "左侧模型",
-            rightModelName: rightAudio?.modelName || "右侧模型",
-            groupLabel: leftAudio?.groupLabel ?? rightAudio?.groupLabel ?? null,
-          });
+         });
         }
 
         const dimensions = await db.getEvaluationDimensionsByQuestionnaire(input.questionnaireId);
         const dimNameMap = new Map<number, string>(dimensions.map(d => [d.id, d.dimensionName]));
 
-        // 收集所有作答的答案
-        const responsesList = await db.getQuestionnaireResponses(input.questionnaireId);
-        const allAnswers: any[] = [];
+        // 样本 = 每份已提交的答卷(测评人维度)。只纳入 submitted/graded 状态,过滤掉进行中/脏数据。
+        const responsesList = (await db.getQuestionnaireResponses(input.questionnaireId))
+          .filter(r => r.status === "submitted" || r.status === "graded");
+
+        // 前端筛选面板用的样本列表(按答卷人),同时统计每份答卷的有效判断数。
+        const answersByResponse = new Map<number, any[]>();
         for (const r of responsesList) {
           const ans = await db.getAnswersByResponse(r.id);
-          allAnswers.push(...ans);
+          answersByResponse.set(r.id, ans);
+        }
+        const responseSamples = responsesList.map(r => ({
+          id: r.id,
+          visitorName: r.visitorName || "匿名",
+          submittedAt: r.submittedAt,
+          judgmentCount: (answersByResponse.get(r.id) || []).filter((a: any) => a.blindTestChoice).length,
+        }));
+
+        // 选中集合:未传或空数组 => 全选(纳入全部)。否则只纳入选中的答卷。
+        const includeSet = input.includeResponseIds && input.includeResponseIds.length > 0
+          ? new Set(input.includeResponseIds)
+          : null;
+
+        // 收集被纳入分析的答卷的答案
+        const allAnswers: any[] = [];
+        let includedResponseCount = 0;
+        for (const r of responsesList) {
+          if (includeSet && !includeSet.has(r.id)) continue;
+          includedResponseCount++;
+          allAnswers.push(...(answersByResponse.get(r.id) || []));
         }
 
         // 聚合键:`${dimensionId}|${modelA}__VS__${modelB}`(modelA/B 按字典序规范化,消除左右差异)
@@ -1260,7 +1274,6 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
 
         for (const a of allAnswers) {
           if (!a.blindTestPairId || !a.blindTestChoice) continue;
-          if (excludeSet.has(a.blindTestPairId)) continue; // 被剔除的样本不参与聚合
           const meta = pairMeta.get(a.blindTestPairId);
           if (!meta) continue;
           if (meta.left === meta.right) continue; // 同模型不比
@@ -1324,10 +1337,10 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
         });
 
         return {
-          totalResponses: responsesList.length,
-          totalJudgments: allAnswers.filter(a => a.blindTestChoice && !excludeSet.has(a.blindTestPairId)).length,
+          totalResponses: includedResponseCount,
+          totalJudgments: allAnswers.filter(a => a.blindTestChoice).length,
           comparisons,
-          pairs: pairList,
+          responseSamples,
         };
       }),
 
