@@ -909,6 +909,7 @@ export default function AdminQuestionnaireDetail() {
                         <TableHead>模型名称</TableHead>
                         <TableHead className="w-40">组别</TableHead>
                         <TableHead>试听</TableHead>
+                        <TableHead>公网链接</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -942,6 +943,28 @@ export default function AdminQuestionnaireDetail() {
                           <TableCell>
                             {audio.fileUrl ? (
                               <audio controls src={audio.fileUrl} className="h-8" />
+                            ) : (
+                              "-"
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            {audio.publicUrl ? (
+                              <div className="flex items-center gap-1">
+                                <code className="text-xs bg-slate-100 rounded px-1.5 py-0.5 max-w-[180px] truncate inline-block align-middle">
+                                  {audio.publicUrl}
+                                </code>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-7 px-2"
+                                  onClick={() => {
+                                    navigator.clipboard.writeText(audio.publicUrl);
+                                    toast.success("公网链接已复制");
+                                  }}
+                                >
+                                  <Copy className="w-3.5 h-3.5" />
+                                </Button>
+                              </div>
                             ) : (
                               "-"
                             )}

@@ -15,6 +15,21 @@ import { toast } from "sonner";
 interface AudioItem {
   file: File;
   modelName: string;
+  // 组别:同一 groupLabel 下不同 modelName 的音频会两两配对。
+  // 默认取文件名(去扩展名),从而不同模型文件夹里的同名音频(如都叫 001.wav)自动归为同一组。
+  groupLabel: string;
+}
+
+// 从文件名推导默认组别:去掉扩展名。这样不同模型目录里的同名文件会落到同一组。
+function deriveGroupLabel(fileName: string): string {
+  const dot = fileName.lastIndexOf(".");
+  return dot > 0 ? fileName.slice(0, dot) : fileName;
+}
+
+// 判断是否音频文件(文件夹上传会带入非音频文件,需过滤)。
+function isAudioFile(file: File): boolean {
+  if (file.type.startsWith("audio/")) return true;
+  return /\.(mp3|wav|m4a|aac|flac|ogg)$/i.test(file.name);
 }
 
 export default function AdminDashboard() {
@@ -27,6 +42,8 @@ export default function AdminDashboard() {
   const [scoringStandard, setScoringStandard] = useState("");
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
+  // 统一模型名(点"应用"后批量填充到所有音频)
+  const [unifiedModelName, setUnifiedModelName] = useState("");
 
   // Fetch admin questionnaires
   const { data: questionnaires, isLoading: isLoadingQuestionnaires, refetch: refetchQuestionnaires } = 
@@ -98,11 +115,35 @@ export default function AdminDashboard() {
   // Add files to the list
   const handleFilesSelected = (files: FileList | null) => {
     if (!files) return;
-    const newItems: AudioItem[] = Array.from(files).map(file => ({
+    const newItems: AudioItem[] = Array.from(files)
+      .filter(isAudioFile)
+      .map(file => ({
+        file,
+        modelName: "",
+        groupLabel: deriveGroupLabel(file.name),
+      }));
+    setAudioItems(prev => [...prev, ...newItems]);
+  };
+
+  // 按文件夹上传:选中整个文件夹后,把其中所有音频文件统一填同一个模型名。
+  // 组别仍按文件名(去扩展名)自动归组,从而与其它模型文件夹里的同名音频两两配对。
+  const handleFolderSelected = (files: FileList | null) => {
+    if (!files) return;
+    const audioFiles = Array.from(files).filter(isAudioFile);
+    if (audioFiles.length === 0) {
+      toast.error("该文件夹内没有音频文件");
+      return;
+    }
+    // 用一级文件夹名作为默认模型名(可在下方逐项修改或用统一模型名输入框覆盖)
+    const rel = (audioFiles[0] as any).webkitRelativePath as string | undefined;
+    const defaultModel = rel ? rel.split("/")[0] : "";
+    const newItems: AudioItem[] = audioFiles.map(file => ({
       file,
-      modelName: "",
+      modelName: defaultModel,
+      groupLabel: deriveGroupLabel(file.name),
     }));
     setAudioItems(prev => [...prev, ...newItems]);
+    toast.success(`已从文件夹添加 ${newItems.length} 个音频，模型名已统一填为「${defaultModel || "(请填写)"}」`);
   };
 
   // Remove an audio item
@@ -113,6 +154,16 @@ export default function AdminDashboard() {
   // Update model name for an audio item
   const updateModelName = (index: number, modelName: string) => {
     setAudioItems(prev => prev.map((item, i) => i === index ? { ...item, modelName } : item));
+  };
+
+  // Update group label for an audio item
+  const updateGroupLabel = (index: number, groupLabel: string) => {
+    setAudioItems(prev => prev.map((item, i) => i === index ? { ...item, groupLabel } : item));
+  };
+
+  // 一键把所有音频的模型名批量填成同一个值(配合文件夹上传使用)
+  const applyUnifiedModelName = (modelName: string) => {
+    setAudioItems(prev => prev.map(item => ({ ...item, modelName })));
   };
 
   // Handle batch upload
@@ -167,6 +218,7 @@ export default function AdminDashboard() {
               mimeType,
               fileSizeBytes: item.file.size,
               modelName: item.modelName.trim(),
+              groupLabel: item.groupLabel.trim() || undefined,
             },
           ],
         });
@@ -276,27 +328,73 @@ export default function AdminDashboard() {
                     {/* Batch File Upload */}
                     <div className="space-y-3">
                       <Label>音频文件（支持批量上传）</Label>
-                      <div className="border-2 border-dashed border-slate-300 rounded-lg p-6 text-center hover:border-blue-400 transition-colors">
-                        <input
-                          type="file"
-                          accept="audio/*"
-                          multiple
-                          onChange={(e) => handleFilesSelected(e.target.files)}
-                          className="hidden"
-                          id="audio-input"
-                        />
-                        <label htmlFor="audio-input" className="cursor-pointer">
-                          <Upload className="w-8 h-8 text-slate-400 mx-auto mb-2" />
-                          <p className="font-medium text-slate-900">点击或拖拽上传音频</p>
-                          <p className="text-sm text-slate-500 mt-1">支持 MP3、WAV、M4A 格式，可多选</p>
-                        </label>
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="border-2 border-dashed border-slate-300 rounded-lg p-6 text-center hover:border-blue-400 transition-colors">
+                          <input
+                            type="file"
+                            accept="audio/*"
+                            multiple
+                            onChange={(e) => handleFilesSelected(e.target.files)}
+                            className="hidden"
+                            id="audio-input"
+                          />
+                          <label htmlFor="audio-input" className="cursor-pointer">
+                            <Upload className="w-8 h-8 text-slate-400 mx-auto mb-2" />
+                            <p className="font-medium text-slate-900">选择音频文件</p>
+                            <p className="text-sm text-slate-500 mt-1">MP3、WAV、M4A，可多选</p>
+                          </label>
+                        </div>
+                        <div className="border-2 border-dashed border-slate-300 rounded-lg p-6 text-center hover:border-blue-400 transition-colors">
+                          <input
+                            type="file"
+                            /* @ts-expect-error webkitdirectory 为浏览器私有属性 */
+                            webkitdirectory=""
+                            directory=""
+                            multiple
+                            onChange={(e) => handleFolderSelected(e.target.files)}
+                            className="hidden"
+                            id="folder-input"
+                          />
+                          <label htmlFor="folder-input" className="cursor-pointer">
+                            <Upload className="w-8 h-8 text-slate-400 mx-auto mb-2" />
+                            <p className="font-medium text-slate-900">选择整个文件夹</p>
+                            <p className="text-sm text-slate-500 mt-1">该文件夹内音频统一模型名</p>
+                          </label>
+                        </div>
                       </div>
+
+                      {/* 统一模型名:一键把所有音频填成同一个模型名 */}
+                      {audioItems.length > 0 && (
+                        <div className="flex items-center gap-2">
+                          <Input
+                            placeholder="统一模型名(填一次,应用到全部)"
+                            value={unifiedModelName}
+                            onChange={(e) => setUnifiedModelName(e.target.value)}
+                            className="flex-1"
+                          />
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              if (!unifiedModelName.trim()) {
+                                toast.error("请先填写统一模型名");
+                                return;
+                              }
+                              applyUnifiedModelName(unifiedModelName.trim());
+                              toast.success("已应用到全部音频");
+                            }}
+                          >
+                            应用到全部
+                          </Button>
+                        </div>
+                      )}
 
                       {/* Audio Items List */}
                       {audioItems.length > 0 && (
                         <div className="space-y-2 mt-4">
                           <p className="text-sm font-medium text-slate-700">
-                            已选择 {audioItems.length} 个文件
+                            已选择 {audioItems.length} 个文件（同一组别下不同模型两两配对）
                           </p>
                           {audioItems.map((item, idx) => (
                             <div key={idx} className="flex items-center gap-3 bg-white border border-slate-200 rounded-lg p-3">
@@ -309,7 +407,13 @@ export default function AdminDashboard() {
                                 placeholder="模型名称"
                                 value={item.modelName}
                                 onChange={(e) => updateModelName(idx, e.target.value)}
-                                className="w-40"
+                                className="w-32"
+                              />
+                              <Input
+                                placeholder="组别"
+                                value={item.groupLabel}
+                                onChange={(e) => updateGroupLabel(idx, e.target.value)}
+                                className="w-28"
                               />
                               <Button
                                 variant="ghost"

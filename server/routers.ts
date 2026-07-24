@@ -3,7 +3,7 @@ import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, router, protectedProcedure, adminProcedure } from "./_core/trpc";
 import { z } from "zod";
-import { storagePut, buildAudioObjectKey } from "./storage";
+import { storagePut, buildAudioObjectKey, buildPublicUrl } from "./storage";
 import { invokeLLM } from "./_core/llm";
 import * as db from "./db";
 import { TRPCError } from "@trpc/server";
@@ -375,7 +375,12 @@ export const appRouter = router({
         }
         const audios = await db.getAudioFilesByQuestionnaire(input.questionnaireId);
         const responseCount = await db.countResponsesByQuestionnaire(input.questionnaireId);
-        return { audios, responseCount };
+        // 为每条音频附加 OSS 公网可直接访问链接(基于 fileKey 拼接),供管理端复制/外部播放。
+        const audiosWithPublicUrl = audios.map((a) => ({
+          ...a,
+          publicUrl: buildPublicUrl(a.fileKey),
+        }));
+        return { audios: audiosWithPublicUrl, responseCount };
       }),
 
     /**

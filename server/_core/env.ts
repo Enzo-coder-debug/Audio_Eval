@@ -16,6 +16,9 @@ export const ENV = {
   ossBucket: process.env.OSS_BUCKET ?? "",
   ossAccessKeyId: process.env.OSS_ACCESS_KEY_ID ?? "",
   ossSecretAccessKey: process.env.OSS_SECRET_ACCESS_KEY ?? "",
+  // OSS 外网访问 Bucket 域名(用于生成可直接播放的公网链接),
+  // 如 https://tts-files.s3.cn-north-1.jdcloud-oss.com。留空则回退到 endpoint+bucket 拼接。
+  ossPublicBaseUrl: process.env.OSS_PUBLIC_BASE_URL ?? "",
 
   // 管理员账号密码登录(脱离 Manus OAuth 后的管理端门禁)
   adminUsername: process.env.ADMIN_USERNAME ?? "",

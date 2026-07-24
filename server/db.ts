@@ -1,5 +1,6 @@
 import { eq, and, desc, isNull, lte, gte, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
+import mysql from "mysql2";
 import { 
   InsertUser, 
   users,
@@ -27,7 +28,14 @@ let _db: ReturnType<typeof drizzle> | null = null;
 export async function getDb() {
   if (!_db && process.env.DATABASE_URL) {
     try {
-      _db = drizzle(process.env.DATABASE_URL);
+      // 显式创建连接池并把驱动会话时区统一为东八区(+08:00)。
+      // 否则 mysql2 默认按容器本地时区(JDOS 容器常为 UTC)解析 DATETIME,
+      // 导致读回的时间比真实北京时间快 8 小时。
+      const pool = mysql.createPool({
+        uri: process.env.DATABASE_URL,
+        timezone: "+08:00",
+      });
+      _db = drizzle(pool);
     } catch (error) {
       console.warn("[Database] Failed to connect:", error);
       _db = null;

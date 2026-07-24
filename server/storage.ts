@@ -95,6 +95,26 @@ export async function storageGet(relKey: string): Promise<{ key: string; url: st
   return { key, url: `/manus-storage/${key}` };
 }
 
+/**
+ * 生成对象的公网可直接访问 URL(脱离本站也能播放/下载)。
+ * 优先用配置的外网 Bucket 域名 OSS_PUBLIC_BASE_URL(如 https://tts-files.s3.cn-north-1.jdcloud-oss.com);
+ * 未配置时回退到 endpoint + bucket 的 path 风格拼接。
+ * 注意:该 URL 能否公开访问取决于 Bucket/对象的读权限(需为公共读)。
+ */
+export function buildPublicUrl(relKey: string): string {
+  const key = normalizeKey(relKey);
+  const base = ENV.ossPublicBaseUrl?.replace(/\/+$/, "");
+  if (base) {
+    return `${base}/${key}`;
+  }
+  // 回退:endpoint + bucket(path 风格)
+  const ep = (ENV.ossEndpoint || "").replace(/\/+$/, "");
+  if (ep && ENV.ossBucket) {
+    return `${ep}/${ENV.ossBucket}/${key}`;
+  }
+  return `/manus-storage/${key}`;
+}
+
 // 生成京东云 OSS 的预签名下载 URL,默认有效期 1 小时。
 export async function storageGetSignedUrl(
   relKey: string,
