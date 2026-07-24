@@ -1052,6 +1052,31 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
           throw new TRPCError({ code: "NOT_FOUND" });
         }
 
+        // 服务端全量校验:盲测问卷必须覆盖全部 pairs × 全部 dimensions,
+        // 防止前端漏组/异常客户端导致残缺样本入库(判断次数不足)。
+        if (response.questionnaireId) {
+          const [pairs, dims] = await Promise.all([
+            db.getBlindTestPairsByQuestionnaire(response.questionnaireId),
+            db.getEvaluationDimensionsByQuestionnaire(response.questionnaireId),
+          ]);
+          if (pairs.length > 0 && dims.length > 0) {
+            const submitted = new Set(
+              input.answers
+                .filter(a => a.blindTestPairId != null && a.evaluationDimensionId != null && a.blindTestChoice != null)
+                .map(a => `${a.blindTestPairId}:${a.evaluationDimensionId}`),
+            );
+            const missing = pairs.some(p =>
+              dims.some(d => !submitted.has(`${p.id}:${d.id}`)),
+            );
+            if (missing) {
+              throw new TRPCError({
+                code: "BAD_REQUEST",
+                message: `答卷不完整:需完成全部 ${pairs.length} 组 × ${dims.length} 个维度的评分后才能提交`,
+              });
+            }
+          }
+        }
+
         // Create answer records
         const answersList = input.answers.map(a => ({
           responseId: input.responseId,

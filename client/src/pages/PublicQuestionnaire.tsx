@@ -87,16 +87,19 @@ export default function PublicQuestionnaire() {
   });
 
   // Initialize pair answers when data loads
+  // 仅在「配对集合(按 pair id)真正变化」时才重建,并保留已作答的选择。
+  // 背景:此前依赖整个 questionnaire 对象,任何 refetch(引用变化)都会把已答的 choices 清空,
+  // 用户回看/网络重取后已答内容丢失,提交时就少了那些组 -> 残缺样本(12/18)。
   useEffect(() => {
-    if (questionnaire?.blindTestPairs) {
-      setPairAnswers(
-        questionnaire.blindTestPairs.map((pair: any) => ({
-          blindTestPairId: pair.id,
-          choices: {},
-        }))
-      );
-    }
-  }, [questionnaire]);
+    const pairs = questionnaire?.blindTestPairs;
+    if (!pairs) return;
+    setPairAnswers((prev) => {
+      const prevById = new Map(prev.map((p) => [p.blindTestPairId, p]));
+      return pairs.map((pair: any) => prevById.get(pair.id) ?? { blindTestPairId: pair.id, choices: {} });
+    });
+    // 用 pair id 序列作为依赖签名,避免对象引用变化触发重置
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [questionnaire?.blindTestPairs?.map((p: any) => p.id).join(",")]);
 
   // Audio player handlers
   const toggleLeftAudio = () => {
@@ -233,6 +236,25 @@ export default function PublicQuestionnaire() {
       return;
     }
     if (!responseId) return;
+
+    // 提交前对「全部组 × 全部维度」做完整性校验:只要有任意一组的任意维度未作答,
+    // 就阻止提交并跳转到第一处未完成的组。
+    // 背景:此前 flatMap 只收集有作答的组,漏答的组不会生成 answer,导致提交后
+    // 出现「判断次数 < 满额(组数×维度数)」的残缺样本(如 12/18)。
+    const dims = questionnaire?.dimensions || [];
+    const total = questionnaire?.blindTestPairs?.length || 0;
+    if (dims.length > 0 && total > 0) {
+      const firstIncomplete = pairAnswers.findIndex(
+        (pa) => !dims.every((dim: any) => pa.choices[dim.id] !== undefined),
+      );
+      // pairAnswers 数量与组数不一致(异常),或存在未答满的组,都视为未完成
+      if (pairAnswers.length !== total || firstIncomplete !== -1) {
+        const jumpTo = firstIncomplete === -1 ? 0 : firstIncomplete;
+        setCurrentPairIndex(jumpTo);
+        toast.error(`还有未完成的评分,请完成第 ${jumpTo + 1} 组后再提交`);
+        return;
+      }
+    }
 
     setIsSubmitting(true);
 
