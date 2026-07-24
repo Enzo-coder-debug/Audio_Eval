@@ -943,6 +943,7 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
       .input(z.object({
         questionnaireId: z.number(),
         visitorName: z.string().min(1, "请输入姓名"),
+        visitorToken: z.string().optional(), // 浏览器级稳定标识,用于区分同 IP 的不同访客
       }))
       .mutation(async ({ input, ctx }) => {
         const questionnaire = await db.getQuestionnaireById(input.questionnaireId);
@@ -959,18 +960,23 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
         }
 
         const visitorIp = ((ctx.req.headers["x-forwarded-for"] as string) || "").split(",")[0] || ctx.req.socket?.remoteAddress || "unknown";
+        const visitorToken = input.visitorToken || "";
 
-        // 复用同 IP 未提交的 in_progress 记录,避免每次进入都新建脏数据
-        const existing = await db.findInProgressResponse(input.questionnaireId, visitorIp);
-        if (existing) {
-          // 更新访客姓名(可能本次填写了新名字),继续沿用该记录
-          await db.updateResponse(existing.id, { visitorName: input.visitorName });
-          return { responseId: existing.id };
+        // 复用同问卷、同浏览器 token 未提交的 in_progress 记录,避免同一个人每次进入都新建脏数据。
+        // 按 token(而非 IP)匹配:同 IP 下的不同访客有各自不同的 token,不会互相复用。
+        if (visitorToken) {
+          const existing = await db.findInProgressResponse(input.questionnaireId, visitorToken);
+          if (existing) {
+            // 更新访客姓名(可能本次填写了新名字),继续沿用该记录
+            await db.updateResponse(existing.id, { visitorName: input.visitorName });
+            return { responseId: existing.id };
+          }
         }
 
         const result = await db.createAnonymousResponse({
           questionnaireId: input.questionnaireId as number,
           visitorIp,
+          visitorToken: visitorToken || null,
           visitorName: input.visitorName,
           status: "in_progress",
         });
@@ -1059,11 +1065,12 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
           submittedAt: new Date(),
         });
 
-        // 清理同问卷、同 IP 的其他残留 in_progress 记录(避免"填写进展/答卷详情"出现脏数据)
-        if (response.visitorIp && response.questionnaireId) {
+        // 清理同问卷、同浏览器 token 的其他残留 in_progress 记录(避免"填写进展/答卷详情"出现脏数据)。
+        // 按 visitorToken 而非 IP:避免误删同一 IP 下其他访客正在进行的答卷。
+        if (response.visitorToken && response.questionnaireId) {
           await db.deleteStaleInProgressResponses(
             response.questionnaireId,
-            response.visitorIp,
+            response.visitorToken,
             input.responseId,
           );
         }

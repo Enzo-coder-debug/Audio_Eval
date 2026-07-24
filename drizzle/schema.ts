@@ -131,6 +131,7 @@ export const responses = mysqlTable("responses", {
   // Ensure either questionnaireId or blindTestPairId is set
 
   visitorIp: varchar("visitorIp", { length: 45 }),
+  visitorToken: varchar("visitorToken", { length: 64 }), // 浏览器级稳定标识(localStorage UUID),用于区分同 IP 的不同访客
   visitorName: varchar("visitorName", { length: 255 }),
   status: mysqlEnum("status", ["in_progress", "submitted", "graded"]).default("in_progress").notNull(),
   totalScore: decimal("totalScore", { precision: 5, scale: 2 }),

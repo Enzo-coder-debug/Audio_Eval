@@ -324,32 +324,36 @@ export async function updateResponse(id: number, updates: Partial<typeof respons
     .where(eq(responses.id, id));
 }
 
-// 查找同问卷、同 IP 且仍处于 in_progress 的记录(用于复用,避免每次进入都新建脏数据)。
-export async function findInProgressResponse(questionnaireId: number, visitorIp: string) {
+// 查找同问卷、同浏览器 token 且仍处于 in_progress 的记录(用于复用,避免同一个人每次进入都新建脏数据)。
+// 用 visitorToken 而非 visitorIp:同一 IP 下可能有多人同时作答,IP 无法区分不同人。
+export async function findInProgressResponse(questionnaireId: number, visitorToken: string) {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
+  if (!visitorToken) return null; // 无 token 时不复用,一律新建
   const rows = await db.select().from(responses)
     .where(and(
       eq(responses.questionnaireId, questionnaireId),
-      eq(responses.visitorIp, visitorIp),
+      eq(responses.visitorToken, visitorToken),
       eq(responses.status, "in_progress"),
     ))
     .orderBy(desc(responses.id));
   return rows[0] || null;
 }
 
-// 清理同问卷、同 IP 的其他残留 in_progress 记录(保留 keepResponseId),先删其 answers 再删 response。
+// 清理同问卷、同浏览器 token 的其他残留 in_progress 记录(保留 keepResponseId),先删其 answers 再删 response。
+// 用 visitorToken 而非 visitorIp:避免误删同一 IP 下其他访客正在进行的答卷。
 export async function deleteStaleInProgressResponses(
   questionnaireId: number,
-  visitorIp: string,
+  visitorToken: string,
   keepResponseId: number,
 ) {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
+  if (!visitorToken) return 0; // 无 token 时不做任何清理,避免误删他人记录
   const rows = await db.select({ id: responses.id }).from(responses)
     .where(and(
       eq(responses.questionnaireId, questionnaireId),
-      eq(responses.visitorIp, visitorIp),
+      eq(responses.visitorToken, visitorToken),
       eq(responses.status, "in_progress"),
     ));
   const staleIds = rows.map(r => r.id).filter(id => id !== keepResponseId);

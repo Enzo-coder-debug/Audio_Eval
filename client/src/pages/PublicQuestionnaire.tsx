@@ -10,6 +10,26 @@ import { Play, Pause, Volume2, Loader2, CheckCircle2 } from "lucide-react";
 
 type BlindTestChoice = "left_better" | "same" | "right_better";
 
+// 获取/生成浏览器级稳定标识,持久化在 localStorage。用于区分同一 IP 下的不同访客,
+// 使"复用未提交记录 / 清理残留 in_progress"按浏览器而非按 IP 生效。
+function getVisitorToken(): string {
+  const KEY = "audio_eval_visitor_token";
+  try {
+    let token = localStorage.getItem(KEY);
+    if (!token) {
+      token =
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      localStorage.setItem(KEY, token);
+    }
+    return token;
+  } catch {
+    // localStorage 不可用(隐私模式等)时降级:返回空串,后端将回退为每次新建、不复用不清理
+    return "";
+  }
+}
+
 interface PairAnswer {
   blindTestPairId: number;
   choices: Record<number, BlindTestChoice>; // dimensionId -> choice
@@ -159,6 +179,7 @@ export default function PublicQuestionnaire() {
     startMutation.mutate({
       questionnaireId: questionnaire.id,
       visitorName: visitorName.trim(),
+      visitorToken: getVisitorToken(),
     });
   };
 
