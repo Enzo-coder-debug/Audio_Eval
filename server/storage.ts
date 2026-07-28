@@ -32,6 +32,13 @@ function getS3(): { client: S3Client; bucket: string } {
         accessKeyId: ENV.ossAccessKeyId,
         secretAccessKey: ENV.ossSecretAccessKey,
       },
+      // 超时保护:避免网络异常时上传请求无限挂起(此前无任何超时配置)。
+      // connectionTimeout 建连 5s,requestTimeout 单请求 60s(大音频留足余量)。
+      requestHandler: {
+        connectionTimeout: 5000,
+        requestTimeout: 60000,
+      },
+      maxAttempts: 3, // 瞬时网络抖动自动重试(默认 3 次含首次)
     });
   }
   return { client: _s3, bucket: ENV.ossBucket };

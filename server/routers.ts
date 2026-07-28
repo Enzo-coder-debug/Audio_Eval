@@ -191,7 +191,9 @@ export const appRouter = router({
         title: z.string().min(1, "请填写问卷名称"),
         audios: z.array(z.object({
           fileName: z.string(),
-          fileData: z.instanceof(Uint8Array),
+          // fileData 以 base64 字符串传输:避免 tRPC superjson 把 Uint8Array 序列化成
+          // 数字数组文本(每字节膨胀 3-4 倍),base64 仅膨胀 ~33%,大幅减小请求体。
+          fileData: z.string(),
           mimeType: z.enum(["audio/mpeg", "audio/wav", "audio/mp4"]),
           fileSizeBytes: z.number(),
           modelName: z.string().min(1), // New field for model name
@@ -222,7 +224,7 @@ export const appRouter = router({
           const uploadResults = await Promise.all(
             input.audios.map((audioInput) => {
               const fileKey = buildAudioObjectKey(ctx.user.id, audioInput.fileName);
-              return storagePut(fileKey, audioInput.fileData, audioInput.mimeType).then((r) => ({
+              return storagePut(fileKey, Buffer.from(audioInput.fileData, "base64"), audioInput.mimeType).then((r) => ({
                 fileKey,
                 fileUrl: r.url,
               }));
@@ -392,7 +394,7 @@ export const appRouter = router({
         questionnaireId: z.number(),
         audios: z.array(z.object({
           fileName: z.string(),
-          fileData: z.instanceof(Uint8Array),
+          fileData: z.string(),
           mimeType: z.enum(["audio/mpeg", "audio/wav", "audio/mp4"]),
           fileSizeBytes: z.number(),
           modelName: z.string().min(1),
@@ -409,7 +411,7 @@ export const appRouter = router({
         const uploadResults = await Promise.all(
           input.audios.map((audioInput) => {
             const fileKey = buildAudioObjectKey(ctx.user.id, audioInput.fileName);
-            return storagePut(fileKey, audioInput.fileData, audioInput.mimeType).then((r) => ({
+            return storagePut(fileKey, Buffer.from(audioInput.fileData, "base64"), audioInput.mimeType).then((r) => ({
               fileKey,
               fileUrl: r.url,
             }));

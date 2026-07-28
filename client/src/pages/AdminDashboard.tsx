@@ -12,6 +12,19 @@ import { Upload, Plus, Music, FileText, LogOut, X, Loader2, Trash2, Copy, Pencil
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
 
+// 将文件读为 base64 字符串上传:相比 tRPC superjson 序列化 Uint8Array(会展开成
+// 数字数组文本,体积膨胀 3-4 倍),base64 仅膨胀 ~33%,显著减小请求体、加快上传。
+async function fileToBase64(file: File): Promise<string> {
+  const buf = await file.arrayBuffer();
+  const bytes = new Uint8Array(buf);
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunk)));
+  }
+  return btoa(binary);
+}
+
 interface AudioItem {
   file: File;
   modelName: string;
@@ -204,7 +217,6 @@ export default function AdminDashboard() {
       // ② 逐个音频串行上传(单文件请求体远小于 1MB 上限)
       for (let i = 0; i < audioItems.length; i++) {
         const item = audioItems[i];
-        const fileData = await item.file.arrayBuffer();
         let mimeType: "audio/mpeg" | "audio/wav" | "audio/mp4" = "audio/mpeg";
         if (item.file.type === "audio/wav") mimeType = "audio/wav";
         else if (item.file.type === "audio/mp4" || item.file.name.endsWith(".m4a")) mimeType = "audio/mp4";
@@ -214,7 +226,7 @@ export default function AdminDashboard() {
           audios: [
             {
               fileName: item.file.name,
-              fileData: new Uint8Array(fileData),
+              fileData: await fileToBase64(item.file),
               mimeType,
               fileSizeBytes: item.file.size,
               modelName: item.modelName.trim(),

@@ -15,13 +15,20 @@ import * as XLSX from "xlsx";
 
 // 读取音频文件为上传所需格式(与 AdminDashboard 一致)。
 async function readAudioForUpload(file: File) {
-  const fileData = await file.arrayBuffer();
+  const buf = await file.arrayBuffer();
+  const bytes = new Uint8Array(buf);
+  // base64 编码:避免 tRPC superjson 把二进制展开成数字数组文本(膨胀 3-4 倍)。
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunk)));
+  }
   let mimeType: "audio/mpeg" | "audio/wav" | "audio/mp4" = "audio/mpeg";
   if (file.type === "audio/wav") mimeType = "audio/wav";
   else if (file.type === "audio/mp4" || file.name.endsWith(".m4a")) mimeType = "audio/mp4";
   return {
     fileName: file.name,
-    fileData: new Uint8Array(fileData),
+    fileData: btoa(binary),
     mimeType,
     fileSizeBytes: file.size,
   };
