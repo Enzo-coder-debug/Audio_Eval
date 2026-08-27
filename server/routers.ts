@@ -247,7 +247,7 @@ export const appRouter = router({
           // 之前是逐个 await 串行上传,N 个文件耗时≈N×单个,这里改为并发以显著提速。
           const uploadResults = await Promise.all(
             input.audios.map((audioInput) => {
-              const fileKey = buildAudioObjectKey(ctx.user.id, audioInput.fileName);
+              const fileKey = buildAudioObjectKey(ctx.user.id, audioInput.fileName, input.title);
               return storagePut(fileKey, Buffer.from(audioInput.fileData, "base64"), audioInput.mimeType).then((r) => ({
                 fileKey,
                 fileUrl: r.url,
@@ -434,7 +434,7 @@ export const appRouter = router({
         // 上传新音频并直接归属该问卷(不自动配对)。并行上传到 OSS(按日期+时间戳子文件夹归档),再顺序写库。
         const uploadResults = await Promise.all(
           input.audios.map((audioInput) => {
-            const fileKey = buildAudioObjectKey(ctx.user.id, audioInput.fileName);
+            const fileKey = buildAudioObjectKey(ctx.user.id, audioInput.fileName, questionnaire.title);
             return storagePut(fileKey, Buffer.from(audioInput.fileData, "base64"), audioInput.mimeType).then((r) => ({
               fileKey,
               fileUrl: r.url,
@@ -971,7 +971,7 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
         if (!questionnaire || questionnaire.creatorId !== ctx.user.id) {
           throw new TRPCError({ code: "FORBIDDEN" });
         }
-        const fileKey = buildAudioObjectKey(ctx.user.id, input.fileName);
+        const fileKey = buildAudioObjectKey(ctx.user.id, input.fileName, questionnaire.title);
         const put = await storagePut(fileKey, Buffer.from(input.fileData, "base64"), input.mimeType);
         const result = await db.createAudioFile({
           uploaderId: ctx.user.id,

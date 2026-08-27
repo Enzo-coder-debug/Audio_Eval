@@ -68,18 +68,29 @@ function normalizeKey(relKey: string): string {
 }
 
 /**
- * 生成带"日期 + 时间戳"子文件夹的对象 key,便于在 bucket 中按上传时间归档,
- * 避免同一前缀(目录)下对象无限堆积,也方便运维按天检索/清理。
- * 结构:audio/<userId>/<YYYYMMDD>/<HHmmss>-<epochMs>-<原文件名>
- * 参考 script/oss_upload.py 的按前缀(prefix)组织对象的思路。
+ * 生成对象 key。bucket 已用独立的 tts-files,顶层再套一层「GSB」一级目录,
+ * 内部按「日期 + 问卷名」子文件夹归档,便于运维按问卷检索/清理。
+ * 结构:GSB/<YYYYMMDD>-<问卷名>/<HHmmss>-<epochMs>-<原文件名>
+ * 若未提供 questionnaireTitle,退化为 GSB/<YYYYMMDD>/<...>。
+ * userId 保留在参数签名以兼容既有调用点,不再拼进 key。
  */
-export function buildAudioObjectKey(userId: number | string, fileName: string): string {
+export function buildAudioObjectKey(
+  _userId: number | string,
+  fileName: string,
+  questionnaireTitle?: string,
+): string {
   const now = new Date();
   const pad = (n: number) => String(n).padStart(2, "0");
   const datePart = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}`;
   const timePart = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  // 问卷名需清洗:路径分隔符、控制字符替换为下划线;首尾空白裁剪;长度上限 60,避免 key 过长。
+  const safeTitle = (questionnaireTitle ?? "")
+    .replace(/[\\/\r\n\t]+/g, "_")
+    .trim()
+    .slice(0, 60);
+  const dirPart = safeTitle ? `${datePart}-${safeTitle}` : datePart;
   const safeName = fileName.replace(/[\\/]+/g, "_");
-  return `audio/${userId}/${datePart}/${timePart}-${now.getTime()}-${safeName}`;
+  return `GSB/${dirPart}/${timePart}-${now.getTime()}-${safeName}`;
 }
 
 function appendHashSuffix(relKey: string): string {
