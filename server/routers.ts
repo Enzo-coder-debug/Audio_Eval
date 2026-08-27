@@ -1060,7 +1060,16 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
           if (existing) {
             // 更新访客姓名(可能本次填写了新名字),继续沿用该记录
             await db.updateResponse(existing.id, { visitorName: input.visitorName });
-            return { responseId: existing.id };
+            // 同时把该记录已保存的 answers 快照返回,供前端水合"中途退出前的作答进度"
+            const savedAnswers = await db.getAnswersByResponse(existing.id);
+            return {
+              responseId: existing.id,
+              savedAnswers: savedAnswers.map(a => ({
+                blindTestPairId: a.blindTestPairId,
+                evaluationDimensionId: a.evaluationDimensionId,
+                blindTestChoice: a.blindTestChoice,
+              })),
+            };
           }
         }
 
@@ -1078,6 +1087,7 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
 
         return {
           responseId: getInsertId(result),
+          savedAnswers: [] as Array<{ blindTestPairId: number | null; evaluationDimensionId: number | null; blindTestChoice: string | null }>,
         };
       }),
 
@@ -1122,6 +1132,51 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
           responseId: response?.id,
           questions,
         };
+      }),
+
+    /**
+     * 中途保存作答进度(公开答卷,匿名访客用)
+     * 与 submitPublic 共享 answers 表的 upsert 快照语义:
+     *   deleteAnswersByResponse(responseId) + createAnswers(list)
+     * 不改 response.status(保持 in_progress),不做完整性校验(允许部分作答)。
+     * 前端断点续答:关闭浏览器 → 再回来 → startPublic 拿到 savedAnswers 水合即可。
+     */
+    saveProgressPublic: publicProcedure
+      .input(z.object({
+        responseId: z.number(),
+        answers: z.array(z.object({
+          questionId: z.number().optional(),
+          evaluationDimensionId: z.number().optional(),
+          blindTestPairId: z.number().optional(),
+          answerContent: z.string().optional(),
+          blindTestChoice: z.enum(["left_better", "same", "right_better"]).optional(),
+        })),
+      }))
+      .mutation(async ({ input }) => {
+        const response = await db.getResponseById(input.responseId);
+        if (!response) {
+          throw new TRPCError({ code: "NOT_FOUND" });
+        }
+        // 已提交的答卷不允许再改
+        if (response.status === "submitted") {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "答卷已提交,无法再修改" });
+        }
+
+        const answersList = input.answers.map(a => ({
+          responseId: input.responseId,
+          questionId: a.questionId || null,
+          evaluationDimensionId: a.evaluationDimensionId || null,
+          blindTestPairId: a.blindTestPairId || null,
+          answerContent: a.answerContent || null,
+          blindTestChoice: a.blindTestChoice || null,
+        }));
+
+        await db.deleteAnswersByResponse(input.responseId);
+        if (answersList.length > 0) {
+          await db.createAnswers(answersList);
+        }
+
+        return { success: true, saved: answersList.length };
       }),
 
     /**
@@ -1179,6 +1234,9 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
           blindTestChoice: a.blindTestChoice || null,
         }));
 
+        // 先清空该 response 之前"中途保存"过的 answers 快照,再统一插入本次提交内容,
+        // 确保 answers 表对同一 (responseId, blindTestPairId, evaluationDimensionId) 只保留一份最终作答。
+        await db.deleteAnswersByResponse(input.responseId);
         await db.createAnswers(answersList);
 
         // Update response status

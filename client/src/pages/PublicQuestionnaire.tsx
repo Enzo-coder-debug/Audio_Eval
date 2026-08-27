@@ -35,6 +35,25 @@ interface PairAnswer {
   choices: Record<number, BlindTestChoice>; // dimensionId -> choice
 }
 
+// 断点续答:按 responseId 在 localStorage 记住当前 pair 指针,关闭浏览器后再回来能定位到上次位置
+const PAIR_IDX_KEY_PREFIX = "audio_eval_pair_idx_";
+function loadSavedPairIndex(responseId: number): number | null {
+  try {
+    const raw = localStorage.getItem(`${PAIR_IDX_KEY_PREFIX}${responseId}`);
+    if (!raw) return null;
+    const n = Number.parseInt(raw, 10);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+function savePairIndex(responseId: number, idx: number) {
+  try { localStorage.setItem(`${PAIR_IDX_KEY_PREFIX}${responseId}`, String(idx)); } catch { /* ignore */ }
+}
+function clearPairIndex(responseId: number) {
+  try { localStorage.removeItem(`${PAIR_IDX_KEY_PREFIX}${responseId}`); } catch { /* ignore */ }
+}
+
 export default function PublicQuestionnaire() {
   const { shareToken } = useParams();
   const [visitorName, setVisitorName] = useState("");
@@ -44,6 +63,14 @@ export default function PublicQuestionnaire() {
   const [pairAnswers, setPairAnswers] = useState<PairAnswer[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isCompleted, setIsCompleted] = useState(false);
+  // 服务端返回的已答快照,等 questionnaire 数据到齐后水合进 pairAnswers
+  const [savedAnswersSnapshot, setSavedAnswersSnapshot] = useState<Array<{
+    blindTestPairId: number | null;
+    evaluationDimensionId: number | null;
+    blindTestChoice: string | null;
+  }> | null>(null);
+  // 断点续答需要"数据加载完成后再跳转"到 savedIdx,避免 questionnaire 还没到就被裁剪掉
+  const [pendingResumeIndex, setPendingResumeIndex] = useState<number | null>(null);
 
   // Audio player state
   const [leftPlaying, setLeftPlaying] = useState(false);
@@ -68,10 +95,25 @@ export default function PublicQuestionnaire() {
     onSuccess: (data) => {
       setResponseId(data.responseId);
       setHasStarted(true);
+      // 断点续答:后端返回该 response 之前中途保存过的 answers 快照,先存下来,
+      // 等 questionnaire.blindTestPairs 到位的 useEffect 里再水合进 pairAnswers。
+      setSavedAnswersSnapshot(data.savedAnswers ?? []);
+      // localStorage 记录的 pair 指针也在此暂存,等 pairs 到齐后再 clamp 到合法范围
+      const saved = loadSavedPairIndex(data.responseId);
+      if (saved !== null) setPendingResumeIndex(saved);
+      if ((data.savedAnswers?.length ?? 0) > 0 || saved !== null) {
+        toast.success("已为你恢复上次的作答进度");
+      }
     },
     onError: (err) => {
       toast.error(err.message || "开始测评失败");
     },
+  });
+
+  // 中途保存作答进度(节流触发,与最终提交共享 answers 表的 upsert 快照语义)
+  const saveProgressMutation = trpc.response.saveProgressPublic.useMutation({
+    // 静默保存,失败不打扰用户(下一次操作会自动重试)
+    onError: () => { /* ignore */ },
   });
 
   // Submit mutation
@@ -79,6 +121,7 @@ export default function PublicQuestionnaire() {
     onSuccess: () => {
       setIsCompleted(true);
       setIsSubmitting(false);
+      if (responseId) clearPairIndex(responseId);
     },
     onError: (err) => {
       toast.error(err.message || "提交失败");
@@ -90,13 +133,44 @@ export default function PublicQuestionnaire() {
   // 仅在「配对集合(按 pair id)真正变化」时才重建,并保留已作答的选择。
   // 背景:此前依赖整个 questionnaire 对象,任何 refetch(引用变化)都会把已答的 choices 清空,
   // 用户回看/网络重取后已答内容丢失,提交时就少了那些组 -> 残缺样本(12/18)。
+  // 额外:如果 startPublic 带回了 savedAnswersSnapshot(断点续答),这里把它水合进 choices,
+  // 消费后清空 snapshot,防止后续 refetch 触发的重跑再次覆盖用户新的作答。
   useEffect(() => {
     const pairs = questionnaire?.blindTestPairs;
     if (!pairs) return;
     setPairAnswers((prev) => {
       const prevById = new Map(prev.map((p) => [p.blindTestPairId, p]));
-      return pairs.map((pair: any) => prevById.get(pair.id) ?? { blindTestPairId: pair.id, choices: {} });
+      // 服务端快照按 (pairId, dimId) 聚合成 choices
+      const snapshotById = new Map<number, Record<number, BlindTestChoice>>();
+      if (savedAnswersSnapshot && savedAnswersSnapshot.length > 0) {
+        for (const a of savedAnswersSnapshot) {
+          if (a.blindTestPairId == null || a.evaluationDimensionId == null || !a.blindTestChoice) continue;
+          const ch = a.blindTestChoice as BlindTestChoice;
+          if (ch !== "left_better" && ch !== "same" && ch !== "right_better") continue;
+          const bucket = snapshotById.get(a.blindTestPairId) ?? {};
+          bucket[a.evaluationDimensionId] = ch;
+          snapshotById.set(a.blindTestPairId, bucket);
+        }
+      }
+      return pairs.map((pair: any) => {
+        const inMemory = prevById.get(pair.id);
+        const fromSnapshot = snapshotById.get(pair.id);
+        if (fromSnapshot) {
+          // 内存中已有的选择优先(用户可能已经在页面里作过答),再补齐快照里的选项
+          return { blindTestPairId: pair.id, choices: { ...fromSnapshot, ...(inMemory?.choices || {}) } };
+     }
+        return inMemory ?? { blindTestPairId: pair.id, choices: {} };
+      });
     });
+    if (savedAnswersSnapshot && savedAnswersSnapshot.length > 0) {
+      setSavedAnswersSnapshot(null);
+    }
+    // 断点续答:pairs 到位后把 pending 的 pair 指针 clamp 到合法范围并生效一次
+    if (pendingResumeIndex !== null && pairs.length > 0) {
+      const clamped = Math.min(Math.max(pendingResumeIndex, 0), pairs.length - 1);
+      setCurrentPairIndex(clamped);
+      setPendingResumeIndex(null);
+    }
     // 用 pair id 序列作为依赖签名,避免对象引用变化触发重置
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [questionnaire?.blindTestPairs?.map((p: any) => p.id).join(",")]);
@@ -185,6 +259,47 @@ export default function PublicQuestionnaire() {
       visitorToken: getVisitorToken(),
     });
   };
+
+  // 断点续答:pair 指针变化时同步 localStorage,关掉浏览器再回来能定位到这一组
+  useEffect(() => {
+    if (responseId != null) savePairIndex(responseId, currentPairIndex);
+  }, [responseId, currentPairIndex]);
+
+  // 断点续答:pairAnswers 变化时 debounce 保存进度到服务端,与最终提交共享 upsert 快照
+  // 仅在已开始答卷且已获得 responseId 后启用;submit/complete 状态下跳过
+  useEffect(() => {
+    if (!hasStarted || responseId == null || isCompleted || isSubmitting) return;
+    const dims = (questionnaire?.dimensions || []) as any[];
+    const pairs = (questionnaire?.blindTestPairs || []) as any[];
+    if (pairs.length === 0) return;
+    const dimsForPair = (pair: any) => {
+      const groupLabel = (pair?.groupLabel || "").trim();
+      return dims.filter((d: any) => {
+        if (d.dimensionType !== "similarity") return true;
+        const groups: string[] = Array.isArray(d.targetGroups) ? d.targetGroups : [];
+        return groupLabel && groups.includes(groupLabel);
+      });
+    };
+    const allAnswers = pairAnswers.flatMap((pa, idx) => {
+      const required = dimsForPair(pairs[idx]);
+      const requiredIds = new Set(required.map((d: any) => d.id));
+      return Object.entries(pa.choices)
+        .filter(([dimId]) => requiredIds.has(Number(dimId)))
+        .map(([dimId, choice]) => ({
+          evaluationDimensionId: Number(dimId),
+          blindTestPairId: pa.blindTestPairId,
+          blindTestChoice: choice as "left_better" | "same" | "right_better",
+        }));
+    });
+    // 空作答(初始加载或全被清空)不必去服务端 delete,避免不必要请求
+    if (allAnswers.length === 0) return;
+    const timer = window.setTimeout(() => {
+      saveProgressMutation.mutate({ responseId, answers: allAnswers });
+    }, 800);
+    return () => window.clearTimeout(timer);
+    // saveProgressMutation 引用稳定,不放入依赖避免无谓重跑
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pairAnswers, hasStarted, responseId, isCompleted, isSubmitting, questionnaire?.dimensions, questionnaire?.blindTestPairs]);
 
   // Handle choice selection
   const handleChoice = (dimensionId: number, choice: BlindTestChoice) => {

@@ -391,6 +391,15 @@ export async function getAnswersByResponse(responseId: number) {
     .orderBy(answers.createdAt);
 }
 
+// 清空指定 response 已保存的所有 answers。
+// 用于"中途保存进度"和"最终提交前先清空"这两种 upsert 语义:
+// 每次保存/提交都先删后插,保证 answers 不会因中途保存 + 最终提交而出现重复行。
+export async function deleteAnswersByResponse(responseId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  return db.delete(answers).where(eq(answers.responseId, responseId));
+}
+
 export async function updateAnswer(id: number, updates: Partial<typeof answers.$inferInsert>) {
   const db = await getDb();
   if (!db) throw new Error("Database not available");

@@ -63,6 +63,7 @@ export default function AdminQuestionnaireDetail() {
   // 每一项 = 一个文件 + 对应模型名
   const [pendingAudios, setPendingAudios] = useState<{ file: File; modelName: string; groupLabel: string }[]>([]);
   const audioInputRef = React.useRef<HTMLInputElement>(null);
+  const audioFolderInputRef = React.useRef<HTMLInputElement>(null);
   // 删除:已勾选待移除的音频 id 集合(支持一次移除成组音频后再统一重建配对)
   const [selectedRemoveIds, setSelectedRemoveIds] = useState<number[]>([]);
   // 组别草稿:音频 id -> 组别输入值(在音频管理表格里就地编辑,保存后调 updateGroupLabels)
@@ -342,6 +343,29 @@ export default function AdminQuestionnaireDetail() {
     const added = Array.from(files).map((file) => ({ file, modelName: "", groupLabel: "" }));
     setPendingAudios((prev) => [...prev, ...added]);
     if (audioInputRef.current) audioInputRef.current.value = "";
+  };
+
+  // 选择文件夹:递归挑出所有音频文件,顶层文件夹名做为默认模型名(可逐项覆盖)。
+  // 与 AdminDashboard.handleFolderSelected 保持一致,便于同名文件按组别自动配对。
+  const isAudioLike = (f: File) => {
+    if (f.type && f.type.startsWith("audio/")) return true;
+    const n = f.name.toLowerCase();
+    return n.endsWith(".mp3") || n.endsWith(".wav") || n.endsWith(".m4a") || n.endsWith(".flac") || n.endsWith(".ogg") || n.endsWith(".aac");
+  };
+  const handleSelectFolder = (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const audioFiles = Array.from(files).filter(isAudioLike);
+    if (audioFiles.length === 0) {
+      toast.error("该文件夹内没有音频文件");
+      if (audioFolderInputRef.current) audioFolderInputRef.current.value = "";
+      return;
+    }
+    const rel = (audioFiles[0] as unknown as { webkitRelativePath?: string }).webkitRelativePath;
+    const defaultModel = rel ? rel.split("/")[0] : "";
+    const added = audioFiles.map((file) => ({ file, modelName: defaultModel, groupLabel: "" }));
+    setPendingAudios((prev) => [...prev, ...added]);
+    toast.success(`已从文件夹添加 ${added.length} 个音频，模型名默认为「${defaultModel || "(请填写)"}」`);
+    if (audioFolderInputRef.current) audioFolderInputRef.current.value = "";
   };
 
   const updatePendingModelName = (index: number, modelName: string) => {
@@ -1036,14 +1060,31 @@ export default function AdminQuestionnaireDetail() {
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="space-y-2">
-                  <Label>选择音频文件（可多选）</Label>
-                  <Input
-                    ref={audioInputRef}
-                    type="file"
-                    multiple
-                    accept="audio/*,.m4a"
-                    onChange={(e) => handleSelectFiles(e.target.files)}
-                  />
+                  <Label>选择音频（可多选文件，或直接选择整个文件夹）</Label>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <span className="text-xs text-slate-500">选择文件</span>
+                      <Input
+                        ref={audioInputRef}
+                        type="file"
+                        multiple
+                        accept="audio/*,.m4a"
+                        onChange={(e) => handleSelectFiles(e.target.files)}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <span className="text-xs text-slate-500">选择文件夹（顶层文件夹名作默认模型名）</span>
+                      <Input
+                        ref={audioFolderInputRef}
+                        type="file"
+                        multiple
+                        /* @ts-expect-error webkitdirectory 为浏览器私有属性 */
+                        webkitdirectory=""
+                        directory=""
+                        onChange={(e) => handleSelectFolder(e.target.files)}
+                      />
+                    </div>
+                  </div>
                 </div>
 
                 {pendingAudios.length > 0 && (
