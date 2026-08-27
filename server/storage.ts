@@ -1,7 +1,15 @@
 // 对象存储助手。
-// 开发环境:本地磁盘(.local-storage)。
+// 开发环境默认:本地磁盘(.local-storage)。
 // 生产环境:京东云 OSS(S3 兼容),上传走 PutObject,下载走预签名 GET URL。
 // 对外 URL 统一为 /manus-storage/{key},前端无需感知后端是哪种存储。
+//
+// 存储后端开关(优先级从高到低):
+//   1. STORAGE_BACKEND=oss   → 强制走 OSS(本地开发想联调 OSS 上传时用)
+//   2. STORAGE_BACKEND=local → 强制走本地磁盘
+//   3. 未设 STORAGE_BACKEND   → NODE_ENV=development 走本地磁盘,其余走 OSS
+// 本地想验证 OSS 上传,不需要改 NODE_ENV,只需在 .env / .env.local 加一行:
+//   STORAGE_BACKEND=oss
+// 并确保 OSS_ENDPOINT 用公网 endpoint(本机不通内网 s3-internal.*)。
 
 import crypto from "node:crypto";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
@@ -9,8 +17,13 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { ENV } from "./_core/env";
 import { localStoragePut } from "./_core/localStorage";
 
-// 开发环境下改用本地磁盘存储。
-const USE_LOCAL_STORAGE = process.env.NODE_ENV === "development";
+const STORAGE_BACKEND = (process.env.STORAGE_BACKEND ?? "").toLowerCase();
+const USE_LOCAL_STORAGE =
+  STORAGE_BACKEND === "oss"
+    ? false
+    : STORAGE_BACKEND === "local"
+      ? true
+      : process.env.NODE_ENV === "development";
 
 let _s3: S3Client | null = null;
 let _s3Public: S3Client | null = null;

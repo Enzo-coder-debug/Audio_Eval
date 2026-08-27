@@ -2,7 +2,17 @@ import type { Express } from "express";
 import { localStorageServe } from "./localStorage";
 import { storageGetSignedUrl } from "../storage";
 
-const USE_LOCAL_STORAGE = process.env.NODE_ENV === "development";
+// 与 storage.ts 保持一致的存储后端开关(优先级:STORAGE_BACKEND > NODE_ENV):
+//   STORAGE_BACKEND=oss   → 强制走 OSS(即使 NODE_ENV=development)
+//   STORAGE_BACKEND=local → 强制走本地磁盘
+//   未设置                 → NODE_ENV=development 走本地磁盘,其余走 OSS
+const STORAGE_BACKEND = (process.env.STORAGE_BACKEND ?? "").toLowerCase();
+const USE_LOCAL_STORAGE =
+  STORAGE_BACKEND === "oss"
+    ? false
+    : STORAGE_BACKEND === "local"
+      ? true
+      : process.env.NODE_ENV === "development";
 
 export function registerStorageProxy(app: Express) {
   app.get("/manus-storage/*", async (req, res) => {
