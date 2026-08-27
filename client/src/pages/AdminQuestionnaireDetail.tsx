@@ -49,6 +49,10 @@ export default function AdminQuestionnaireDetail() {
   // 特殊维度：音色相似度
   const [dimensionType, setDimensionType] = useState<"normal" | "similarity">("normal");
   const [referenceAudioFileId, setReferenceAudioFileId] = useState<number | null>(null);
+  // 参考音频当前显示的文件名(独立上传流程,仅用于回显,不用于业务逻辑)
+  const [referenceAudioFileName, setReferenceAudioFileName] = useState<string>("");
+  const [referenceAudioUploading, setReferenceAudioUploading] = useState(false);
+  const referenceAudioInputRef = React.useRef<HTMLInputElement>(null);
   const [targetGroupLabels, setTargetGroupLabels] = useState<string[]>([]);
   // 编辑评分标准(保存后自动重新解析并同步维度)
   const [isStandardDialogOpen, setIsStandardDialogOpen] = useState(false);
@@ -200,6 +204,10 @@ export default function AdminQuestionnaireDetail() {
       },
     });
 
+  // 上传"音色相似度"参考音频:独立文件上传通道,写入 audioFiles 并以 modelName='__reference__' 标记
+  const { mutateAsync: uploadReferenceAudioAsync } =
+    trpc.dimension.uploadReferenceAudio.useMutation();
+
   // 保存评分标准:变更后端会自动重新解析并同步维度(删旧建新);若已有作答会一并清理
   const { mutate: updateStandard, isPending: isUpdatingStandard } =
     trpc.questionnaire.update.useMutation({
@@ -234,6 +242,8 @@ export default function AdminQuestionnaireDetail() {
     setDimensionMaxScore("10");
     setDimensionType("normal");
     setReferenceAudioFileId(null);
+    setReferenceAudioFileName("");
+    setReferenceAudioUploading(false);
     setTargetGroupLabels([]);
     setEditingDimensionId(null);
   };
@@ -285,6 +295,11 @@ export default function AdminQuestionnaireDetail() {
     setDimensionMaxScore(String(dimension.maxScore));
     setDimensionType((dimension.dimensionType as "normal" | "similarity") || "normal");
     setReferenceAudioFileId(dimension.referenceAudioFileId ?? null);
+    // 参考音频文件名回显:优先从 dimension 关联对象取,否则查 questionnaireAudios(含参考音频)。
+    // 由于 questionnaireAudios 默认过滤参考音频,这里通过 fileName 兜底为空;编辑时如已选参考音频将显示 ID 占位。
+    // 注:实际业务下参考音频独立上传后不会出现在此列表,编辑态如需显示文件名建议后端在 dimension 关联参考音频对象。
+    setReferenceAudioFileName(dimension.referenceAudioFile?.fileName || "");
+    setReferenceAudioUploading(false);
     // 后端 targetGroupLabels 存的是 JSON 字符串
     let groups: string[] = [];
     if (Array.isArray(dimension.targetGroups)) {
@@ -302,6 +317,29 @@ export default function AdminQuestionnaireDetail() {
   const handleDeleteDimension = (dimensionId: number) => {
     if (confirm("确定要删除这个维度吗？")) {
       deleteDimension({ id: dimensionId });
+    }
+  };
+
+  // 独立上传参考音频:与音频管理的批量上传隔离,只做单文件,成功后即回填 referenceAudioFileId
+  const handleReferenceAudioSelect = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const file = files[0];
+    if (referenceAudioInputRef.current) referenceAudioInputRef.current.value = "";
+    if (!questionnaireId) {
+      toast.error("请先保存问卷");
+      return;
+    }
+    setReferenceAudioUploading(true);
+    try {
+      const payload = await readAudioForUpload(file);
+      const res = await uploadReferenceAudioAsync({ questionnaireId, ...payload });
+      setReferenceAudioFileId(res.audioFileId);
+      setReferenceAudioFileName(res.fileName);
+      toast.success("参考音频上传成功");
+    } catch (err: any) {
+      toast.error(err?.message || "参考音频上传失败");
+    } finally {
+      setReferenceAudioUploading(false);
     }
   };
 
@@ -731,6 +769,7 @@ export default function AdminQuestionnaireDetail() {
                           setDimensionType(next);
                           if (next === "normal") {
                             setReferenceAudioFileId(null);
+                            setReferenceAudioFileName("");
                             setTargetGroupLabels([]);
                           }
                         }}
@@ -749,27 +788,37 @@ export default function AdminQuestionnaireDetail() {
                       <>
                         <div className="space-y-2">
                           <Label>参考音频 *</Label>
-                          <Select
-                            value={referenceAudioFileId ? String(referenceAudioFileId) : ""}
-                            onValueChange={(v) => setReferenceAudioFileId(v ? parseInt(v) : null)}
-                          >
-                            <SelectTrigger>
-                              <SelectValue placeholder="从问卷现有音频中选择" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {questionnaireAudios.length === 0 ? (
-                                <div className="px-3 py-2 text-sm text-slate-500">该问卷暂无音频，请先在「音频管理」上传</div>
-                              ) : (
-                                questionnaireAudios.map((a: any) => (
-                                  <SelectItem key={a.id} value={String(a.id)}>
-                                    {a.fileName}
-                                    {a.modelName ? `（${a.modelName}）` : ""}
-                                    {a.groupLabel ? ` · 组：${a.groupLabel}` : ""}
-                                  </SelectItem>
-                                ))
-                              )}
-                            </SelectContent>
-                          </Select>
+                          <div className="flex items-center gap-2">
+                            <input
+                              ref={referenceAudioInputRef}
+                              type="file"
+                              accept="audio/*,.m4a"
+                              className="hidden"
+                              onChange={(e) => handleReferenceAudioSelect(e.target.files)}
+                            />
+                            <Button
+                        type="button"
+                              variant="outline"
+                              disabled={referenceAudioUploading}
+                              onClick={() => referenceAudioInputRef.current?.click()}
+                            >
+                              {referenceAudioUploading
+                                ? "上传中..."
+                                : referenceAudioFileId
+                                ? "重新上传"
+                                : "上传参考音频"}
+                            </Button>
+                            <div className="text-sm text-slate-600 truncate">
+                              {referenceAudioFileName
+                                ? referenceAudioFileName
+                                : referenceAudioFileId
+                                ? `已选参考音频 #${referenceAudioFileId}`
+                                : "尚未上传"}
+                            </div>
+                          </div>
+                          <p className="text-xs text-slate-500">
+                            参考音频将独立存储,不进入音频管理列表,也不参与盲测配对。
+                          </p>
                         </div>
 
                         <div className="space-y-2">
@@ -914,6 +963,8 @@ export default function AdminQuestionnaireDetail() {
                               <span className="text-slate-600">参考音频：</span>
                               <span className="font-medium">
          {(() => {
+                                  // 优先用后端 join 返回的 referenceAudioFile;老数据兼容:再查一次 questionnaireAudios
+                                  if (dimension.referenceAudioFile?.fileName) return dimension.referenceAudioFile.fileName;
                                   const ref = questionnaireAudios.find((a: any) => a.id === dimension.referenceAudioFileId);
                                   return ref ? `${ref.fileName}${ref.modelName ? `（${ref.modelName}）` : ""}` : `#${dimension.referenceAudioFileId ?? "-"}`;
                                 })()}

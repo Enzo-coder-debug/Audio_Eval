@@ -500,7 +500,12 @@ export async function deleteEvaluationDimensionsByQuestionnaire(questionnaireId:
  */
 
 // 取某问卷用到的全部音频(按 audioFileId 去重,保留稳定顺序)。
-export async function getAudioFilesByQuestionnaire(questionnaireId: number) {
+// 注意:默认排除 modelName='__reference__' 的参考音频(音色相似度维度专用),
+// 若需拿到参考音频(如维度校验/复制问卷),显式传 includeReference=true。
+export async function getAudioFilesByQuestionnaire(
+  questionnaireId: number,
+  options?: { includeReference?: boolean }
+) {
   const db = await getDb();
   if (!db) return [] as AudioFile[];
 
@@ -509,7 +514,8 @@ export async function getAudioFilesByQuestionnaire(questionnaireId: number) {
   const rows = await db.select().from(audioFiles)
     .where(eq(audioFiles.questionnaireId, questionnaireId))
     .orderBy(audioFiles.id);
-  return rows;
+  if (options?.includeReference) return rows;
+  return rows.filter(r => r.modelName !== "__reference__");
 }
 
 // 删除某问卷的全部盲测配对(重建配对前调用)。

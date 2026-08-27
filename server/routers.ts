@@ -17,6 +17,9 @@ function getInsertId(result: unknown): number {
   return Number((result as { insertId?: number })?.insertId);
 }
 
+// 参考音频(音色相似度维度)在 audioFiles 中用此 modelName 作标记:不参与配对、不出现在音频管理列表。
+export const REFERENCE_MODEL_NAME = "__reference__";
+
 // 默认预置评分维度:所有新问卷创建时自动带入这三个常用维度(音质/自然度/情感表现力)。
 // 释义为产品统一约定,管理员可在问卷详情页按需增删或补充"音色相似度"等特殊维度。
 export const DEFAULT_EVALUATION_DIMENSIONS: { dimensionName: string; description: string }[] = [
@@ -823,8 +826,9 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
         });
         const newQuestionnaireId = getInsertId(qResult);
 
-        // 2. 复制音频�录(新 questionnaireId, 保留 groupLabel/modelName/OSS 对象共享)
-        const sourceAudios = await db.getAudioFilesByQuestionnaire(input.id);
+        // 2. 复制音频记录(新 questionnaireId, 保留 groupLabel/modelName/OSS 对象共享)
+        //    包含参考音频(__reference__),这样相似度维度的 referenceAudioFileId 可以在副本中正确指向。
+        const sourceAudios = await db.getAudioFilesByQuestionnaire(input.id, { includeReference: true });
         const copiedAudios: { audioFileId: number; modelName: string; groupLabel: string | null }[] = [];
         for (const a of sourceAudios) {
           const r = await db.createAudioFile({
@@ -933,7 +937,57 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
         return { success: true, dimensionId: getInsertId(result) };
       }),
 
-    list: publicProcedure.input(z.object({ questionnaireId: z.number() })).query(({ input }) => db.getEvaluationDimensionsByQuestionnaire(input.questionnaireId)),
+    list: publicProcedure.input(z.object({ questionnaireId: z.number() })).query(async ({ input }) => {
+      const dimensions = await db.getEvaluationDimensionsByQuestionnaire(input.questionnaireId);
+      // 附加参考音频文件名(参考音频不在音频管理列表中,前端无法通过 audios 查到)。
+      const refIds = Array.from(new Set(dimensions.map(d => d.referenceAudioFileId).filter((v): v is number => !!v)));
+      const refMap = new Map<number, { fileName: string; fileUrl: string }>();
+      for (const rid of refIds) {
+        const a = await db.getAudioFileById(rid);
+        if (a) refMap.set(rid, { fileName: a.fileName, fileUrl: a.fileUrl });
+      }
+      return dimensions.map(d => ({
+        ...d,
+        referenceAudioFile: d.referenceAudioFileId ? refMap.get(d.referenceAudioFileId) ?? null : null,
+      }));
+    }),
+
+    /**
+     * 上传"音色相似度"参考音频。
+     * - 上传到 OSS,写 audioFiles 记录:归属当前问卷、modelName='__reference__' 作为标记,groupLabel=null。
+     * - 参考音频不参与盲测配对、不出现在音频管理列表(见 REFERENCE_MODEL_NAME 过滤)。
+     * - 返回 { audioFileId, fileUrl, fileName } 供前端立即写入维度的 referenceAudioFileId。
+     */
+    uploadReferenceAudio: adminProcedure
+      .input(z.object({
+        questionnaireId: z.number(),
+        fileName: z.string(),
+      fileData: z.string(), // base64
+        mimeType: z.enum(["audio/mpeg", "audio/wav", "audio/mp4"]),
+        fileSizeBytes: z.number(),
+      }))
+ .mutation(async ({ input, ctx }) => {
+        const questionnaire = await db.getQuestionnaireById(input.questionnaireId);
+        if (!questionnaire || questionnaire.creatorId !== ctx.user.id) {
+          throw new TRPCError({ code: "FORBIDDEN" });
+        }
+        const fileKey = buildAudioObjectKey(ctx.user.id, input.fileName);
+        const put = await storagePut(fileKey, Buffer.from(input.fileData, "base64"), input.mimeType);
+        const result = await db.createAudioFile({
+          uploaderId: ctx.user.id,
+          fileName: input.fileName,
+          fileKey,
+          fileUrl: put.url,
+          mimeType: input.mimeType,
+          fileSizeBytes: input.fileSizeBytes,
+          transcription: null,
+          modelName: REFERENCE_MODEL_NAME,
+          questionnaireId: input.questionnaireId,
+          groupLabel: null,
+        });
+        const audioFileId = getInsertId(result);
+        return { audioFileId, fileUrl: put.url, fileName: input.fileName };
+      }),
 
     update: adminProcedure
       .input(z.object({ id: z.number(), dimensionName: z.string().trim().min(1).optional(), description: z.string().optional(), weight: z.number().optional(), maxScore: z.number().optional(), orderIndex: z.number().optional(), dimensionType: z.enum(["normal", "similarity"]).optional(), referenceAudioFileId: z.number().int().positive().nullable().optional(), targetGroupLabels: z.array(z.string().trim().min(1)).optional() }))
