@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ArrowLeft, Plus, Edit2, Trash2, Music, Send, Copy, Globe, BarChart3, Download } from "lucide-react";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
@@ -45,6 +46,10 @@ export default function AdminQuestionnaireDetail() {
   const [dimensionDescription, setDimensionDescription] = useState("");
   const [dimensionWeight, setDimensionWeight] = useState("1");
   const [dimensionMaxScore, setDimensionMaxScore] = useState("10");
+  // 特殊维度：音色相似度
+  const [dimensionType, setDimensionType] = useState<"normal" | "similarity">("normal");
+  const [referenceAudioFileId, setReferenceAudioFileId] = useState<number | null>(null);
+  const [targetGroupLabels, setTargetGroupLabels] = useState<string[]>([]);
   // 编辑评分标准(保存后自动重新解析并同步维度)
   const [isStandardDialogOpen, setIsStandardDialogOpen] = useState(false);
   const [standardDraft, setStandardDraft] = useState("");
@@ -218,15 +223,7 @@ export default function AdminQuestionnaireDetail() {
       toast.error("请填写评分标准");
       return;
     }
-    if (
-      standardDraft !== (questionnaire?.scoringStandard || "") &&
-      audioResponseCount > 0 &&
-      !window.confirm(
-        `修改评分标准会重新解析评分维度，并清空该问卷已有的 ${audioResponseCount} 份作答记录，确定继续吗？`
-      )
-    ) {
-      return;
-    }
+    // 后端已停止在 update 时依据评分标准重建维度，这里只是纯文本存档
     updateStandard({ id: questionnaireId, scoringStandard: standardDraft });
   };
 
@@ -235,6 +232,9 @@ export default function AdminQuestionnaireDetail() {
     setDimensionDescription("");
     setDimensionWeight("1");
     setDimensionMaxScore("10");
+    setDimensionType("normal");
+    setReferenceAudioFileId(null);
+    setTargetGroupLabels([]);
     setEditingDimensionId(null);
   };
 
@@ -244,21 +244,34 @@ export default function AdminQuestionnaireDetail() {
       return;
     }
 
+    // 相似度维度：必须选择参考音频与至少一个目标组别
+    if (dimensionType === "similarity") {
+      if (!referenceAudioFileId) {
+        toast.error("音色相似度维度必须选择参考音频");
+        return;
+      }
+      if (!targetGroupLabels.length) {
+        toast.error("音色相似度维度必须选择至少一个目标组别");
+        return;
+      }
+    }
+
+    const payload: any = {
+      dimensionName,
+      description: dimensionDescription || undefined,
+      weight: parseFloat(dimensionWeight),
+      maxScore: parseFloat(dimensionMaxScore),
+      dimensionType,
+      referenceAudioFileId: dimensionType === "similarity" ? referenceAudioFileId : null,
+      targetGroupLabels: dimensionType === "similarity" ? targetGroupLabels : [],
+    };
+
     if (editingDimensionId) {
-      updateDimension({
-        id: editingDimensionId,
-        dimensionName,
-        description: dimensionDescription || undefined,
-        weight: parseFloat(dimensionWeight),
-        maxScore: parseFloat(dimensionMaxScore),
-      });
+      updateDimension({ id: editingDimensionId, ...payload });
     } else {
       createDimension({
         questionnaireId,
-        dimensionName,
-        description: dimensionDescription || undefined,
-        weight: parseFloat(dimensionWeight),
-        maxScore: parseFloat(dimensionMaxScore),
+        ...payload,
         orderIndex: (dimensions?.length || 0) + 1,
       });
     }
@@ -270,6 +283,19 @@ export default function AdminQuestionnaireDetail() {
     setDimensionDescription(dimension.description || "");
     setDimensionWeight(String(dimension.weight));
     setDimensionMaxScore(String(dimension.maxScore));
+    setDimensionType((dimension.dimensionType as "normal" | "similarity") || "normal");
+    setReferenceAudioFileId(dimension.referenceAudioFileId ?? null);
+    // 后端 targetGroupLabels 存的是 JSON 字符串
+    let groups: string[] = [];
+    if (Array.isArray(dimension.targetGroups)) {
+      groups = dimension.targetGroups;
+    } else if (typeof dimension.targetGroupLabels === "string") {
+      try {
+        const parsed = JSON.parse(dimension.targetGroupLabels);
+        if (Array.isArray(parsed)) groups = parsed.filter((v: any) => typeof v === "string");
+      } catch { /* ignore */ }
+    }
+    setTargetGroupLabels(groups);
     setIsDimensionDialogOpen(true);
   };
 
@@ -606,12 +632,7 @@ export default function AdminQuestionnaireDetail() {
                     <DialogHeader>
                       <DialogTitle>编辑评分标准</DialogTitle>
                       <DialogDescription>
-                        保存后将根据评分标准文本自动重新解析并同步评分维度（覆盖现有维度）。
-                        {audioResponseCount > 0 && (
-                          <span className="text-red-600">
-                            {" "}该问卷已有 {audioResponseCount} 份作答，保存将一并清空。
-                          </span>
-                        )}
+                        评分标准将作为参考文本存档，不再自动覆盖维度。请前往「测评维度」手动新增或调整评分维度。
                       </DialogDescription>
                     </DialogHeader>
                     <div className="space-y-4">
@@ -634,7 +655,7 @@ export default function AdminQuestionnaireDetail() {
                           disabled={isUpdatingStandard}
                           onClick={handleSaveStandard}
                         >
-                          {isUpdatingStandard ? "保存中..." : "保存并重新解析"}
+                          {isUpdatingStandard ? "保存中..." : "保存"}
                         </Button>
                       </div>
                     </div>
@@ -700,6 +721,102 @@ export default function AdminQuestionnaireDetail() {
                       </div>
                     </div>
 
+                    {/* 维度类型：普通 / 音色相似度。相似度维度需绑定参考音频并指定目标组别 */}
+                    <div className="space-y-2">
+                      <Label>维度类型</Label>
+                      <Select
+                        value={dimensionType}
+                        onValueChange={(v) => {
+                          const next = v as "normal" | "similarity";
+                          setDimensionType(next);
+                          if (next === "normal") {
+                            setReferenceAudioFileId(null);
+                            setTargetGroupLabels([]);
+                          }
+                        }}
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder="选择维度类型" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="normal">普通评分维度</SelectItem>
+                          <SelectItem value="similarity">音色相似度（需参考音频+目标组别）</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    {dimensionType === "similarity" && (
+                      <>
+                        <div className="space-y-2">
+                          <Label>参考音频 *</Label>
+                          <Select
+                            value={referenceAudioFileId ? String(referenceAudioFileId) : ""}
+                            onValueChange={(v) => setReferenceAudioFileId(v ? parseInt(v) : null)}
+                          >
+                            <SelectTrigger>
+                              <SelectValue placeholder="从问卷现有音频中选择" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {questionnaireAudios.length === 0 ? (
+                                <div className="px-3 py-2 text-sm text-slate-500">该问卷暂无音频，请先在「音频管理」上传</div>
+                              ) : (
+                                questionnaireAudios.map((a: any) => (
+                                  <SelectItem key={a.id} value={String(a.id)}>
+                                    {a.fileName}
+                                    {a.modelName ? `（${a.modelName}）` : ""}
+                                    {a.groupLabel ? ` · 组：${a.groupLabel}` : ""}
+                                  </SelectItem>
+                                ))
+                              )}
+                            </SelectContent>
+                          </Select>
+                        </div>
+
+                        <div className="space-y-2">
+                          <Label>目标组别 *（只在包含以下组别的盲测题上展示）</Label>
+                          {(() => {
+                            const groupsAvailable = Array.from(new Set(
+                              questionnaireAudios
+                                .map((a: any) => (a.groupLabel || "").trim())
+                                .filter((v: string) => Boolean(v))
+                            )) as string[];
+                            if (groupsAvailable.length === 0) {
+                              return (
+                                <div className="rounded-md border border-dashed p-3 text-sm text-slate-500">
+                      问卷音频尚未设置组别，请先到「音频管理」为音频指定组别
+                                </div>
+                              );
+                            }
+                            return (
+                              <div className="flex flex-wrap gap-2">
+                                {groupsAvailable.map((g) => {
+                                  const active = targetGroupLabels.includes(g);
+                                  return (
+                                    <button
+                                      key={g}
+                                     type="button"
+                                      onClick={() =>
+                                        setTargetGroupLabels((prev) =>
+                                          prev.includes(g) ? prev.filter((x) => x !== g) : [...prev, g]
+                                        )
+                                      }
+                                      className={`px-3 py-1 rounded-full border text-sm ${
+                                        active
+                                          ? "bg-blue-600 text-white border-blue-600"
+                                          : "bg-white text-slate-700 border-slate-300 hover:border-blue-400"
+                                      }`}
+                                    >
+                                      {g}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      </>
+                    )}
+
                     <div className="flex gap-2 pt-4">
                       <Button
                         variant="outline"
@@ -748,7 +865,14 @@ export default function AdminQuestionnaireDetail() {
                     <CardHeader className="pb-3">
                       <div className="flex items-start justify-between">
                         <div>
-                          <CardTitle className="text-lg">{dimension.dimensionName}</CardTitle>
+                          <CardTitle className="text-lg">
+                            {dimension.dimensionName}
+                            {dimension.dimensionType === "similarity" && (
+                              <span className="ml-2 inline-block rounded-full bg-purple-100 px-2 py-0.5 text-xs font-medium text-purple-700 align-middle">
+                                音色相似度
+                              </span>
+                            )}
+                          </CardTitle>
                           {dimension.description && (
                             <CardDescription className="mt-1">
                               {dimension.description}
@@ -775,7 +899,7 @@ export default function AdminQuestionnaireDetail() {
                       </div>
                     </CardHeader>
                     <CardContent>
-                      <div className="flex gap-6 text-sm">
+                      <div className="flex flex-wrap gap-6 text-sm">
                         <div>
                           <span className="text-slate-600">权重：</span>
                           <span className="font-medium">{dimension.weight}</span>
@@ -784,6 +908,33 @@ export default function AdminQuestionnaireDetail() {
                           <span className="text-slate-600">满分：</span>
                           <span className="font-medium">{dimension.maxScore}</span>
                         </div>
+                        {dimension.dimensionType === "similarity" && (
+                          <>
+                            <div>
+                              <span className="text-slate-600">参考音频：</span>
+                              <span className="font-medium">
+         {(() => {
+                                  const ref = questionnaireAudios.find((a: any) => a.id === dimension.referenceAudioFileId);
+                                  return ref ? `${ref.fileName}${ref.modelName ? `（${ref.modelName}）` : ""}` : `#${dimension.referenceAudioFileId ?? "-"}`;
+                                })()}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="text-slate-600">目标组别：</span>
+                              <span className="font-medium">
+                                {(() => {
+                                  if (Array.isArray(dimension.targetGroups) && dimension.targetGroups.length) {
+                                    return dimension.targetGroups.join("、");
+                                  }
+                                  try {
+                                    const parsed = JSON.parse(dimension.targetGroupLabels || "[]");
+                                    return Array.isArray(parsed) ? parsed.join("、") : "-";
+                                  } catch { return "-"; }
+                                })()}
+                              </span>
+                            </div>
+                          </>
+                        )}
                       </div>
                     </CardContent>
                   </Card>

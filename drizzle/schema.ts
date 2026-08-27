@@ -199,6 +199,12 @@ export const evaluationDimensions = mysqlTable("evaluationDimensions", {
   weight: decimal("weight", { precision: 5, scale: 2 }).default("1"), // scoring weight
   maxScore: decimal("maxScore", { precision: 5, scale: 2 }).default("10"), // max score for this dimension
   orderIndex: int("orderIndex").notNull(), // display order
+  // 维度类型:normal=普通评分维度;similarity=音色相似度(需参考音频+指定组别)。
+  dimensionType: varchar("dimensionType", { length: 32 }).default("normal").notNull(),
+  // 音色相似度参考音频(引用 audioFiles.id);仅 dimensionType=similarity 时使用。
+  referenceAudioFileId: int("referenceAudioFileId"),
+  // 音色相似度作用的目标组别(逗号分隔的 groupLabel 列表);仅 dimensionType=similarity 时使用。
+  targetGroupLabels: text("targetGroupLabels"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });

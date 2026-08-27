@@ -197,10 +197,7 @@ export default function AdminDashboard() {
       toast.error("请填写测评背景");
       return;
     }
-    if (!scoringStandard.trim()) {
-      toast.error("请填写评分标准");
-      return;
-    }
+    // 创建问卷不再需要填写指标(评分标准):后端会自动带入默认预置维度(音质/自然度/情感表现力)。
 
     // 分片串行上传:每次请求体只含单个音频,避免网关(JDOS ingress 默认 1MB)对大请求体返回 413。
     // 流程:① 只建问卷+评分维度 → ② 逐个音频 addToQuestionnaire → ③ 全部传完再 generatePairs。
@@ -211,7 +208,6 @@ export default function AdminDashboard() {
       const { questionnaireId, dimensionsCount } = await createQuestionnaire.mutateAsync({
         title: title.trim(),
         evaluationCopywriting,
-        scoringStandard,
       });
 
       // ② 逐个音频串行上传(单文件请求体远小于 1MB 上限)
@@ -453,16 +449,14 @@ export default function AdminDashboard() {
                       />
                     </div>
 
-                    {/* Scoring Standard */}
+                    {/* 评分维度:创建问卷不再需要填写指标,系统自动带入默认预置维度。
+                        音色相似度等特殊指标可在问卷详情页按需添加。 */}
                     <div className="space-y-2">
-                      <Label htmlFor="standard">评分标准</Label>
-                      <Textarea
-                        id="standard"
-                        placeholder="详细说明评分维度和标准，如：情绪表达、音质清晰度、自然度等..."
-                        value={scoringStandard}
-                        onChange={(e) => setScoringStandard(e.target.value)}
-                        className="min-h-24"
-                      />
+                      <Label>评分维度</Label>
+                      <p className="text-sm text-slate-500 leading-relaxed">
+                        系统将自动带入默认评分维度:<span className="font-medium text-slate-700">音质、自然度、情感表现力</span>。
+                        创建后可在问卷详情页增删维度,或添加「音色相似度」等特殊指标。
+                      </p>
                     </div>
 
                     <div className="flex gap-3 justify-end pt-4">

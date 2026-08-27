@@ -208,7 +208,16 @@ export default function PublicQuestionnaire() {
     if (!questionnaire?.dimensions || questionnaire.dimensions.length === 0) return true;
     const currentAnswer = pairAnswers[currentPairIndex];
     if (!currentAnswer) return false;
-    return questionnaire.dimensions.every((dim: any) => currentAnswer.choices[dim.id] !== undefined);
+    const currentPair = questionnaire.blindTestPairs?.[currentPairIndex];
+    // 相似度维度按组别过滤：不适用于当前组的相似度维度视为「无需作答」
+    const groupLabel = (currentPair?.groupLabel || "").trim();
+    const dimsForPair = (questionnaire.dimensions as any[]).filter((d: any) => {
+      if (d.dimensionType !== "similarity") return true;
+      const groups: string[] = Array.isArray(d.targetGroups) ? d.targetGroups : [];
+      return groupLabel && groups.includes(groupLabel);
+    });
+    if (dimsForPair.length === 0) return true;
+    return dimsForPair.every((dim: any) => currentAnswer.choices[dim.id] !== undefined);
   };
 
   // Handle next pair
@@ -241,12 +250,23 @@ export default function PublicQuestionnaire() {
     // 就阻止提交并跳转到第一处未完成的组。
     // 背景:此前 flatMap 只收集有作答的组,漏答的组不会生成 answer,导致提交后
     // 出现「判断次数 < 满额(组数×维度数)」的残缺样本(如 12/18)。
-    const dims = questionnaire?.dimensions || [];
-    const total = questionnaire?.blindTestPairs?.length || 0;
+    // 注意:音色相似度维度按组别限定，只在命中组别的题目上要求作答。
+    const dims = (questionnaire?.dimensions || []) as any[];
+    const pairs = (questionnaire?.blindTestPairs || []) as any[];
+    const total = pairs.length;
+    const dimsForPair = (pair: any) => {
+      const groupLabel = (pair?.groupLabel || "").trim();
+      return dims.filter((d: any) => {
+        if (d.dimensionType !== "similarity") return true;
+        const groups: string[] = Array.isArray(d.targetGroups) ? d.targetGroups : [];
+        return groupLabel && groups.includes(groupLabel);
+      });
+    };
     if (dims.length > 0 && total > 0) {
-      const firstIncomplete = pairAnswers.findIndex(
-        (pa) => !dims.every((dim: any) => pa.choices[dim.id] !== undefined),
-      );
+      const firstIncomplete = pairAnswers.findIndex((pa, idx) => {
+        const required = dimsForPair(pairs[idx]);
+        return !required.every((dim: any) => pa.choices[dim.id] !== undefined);
+      });
       // pairAnswers 数量与组数不一致(异常),或存在未答满的组,都视为未完成
       if (pairAnswers.length !== total || firstIncomplete !== -1) {
         const jumpTo = firstIncomplete === -1 ? 0 : firstIncomplete;
@@ -258,14 +278,18 @@ export default function PublicQuestionnaire() {
 
     setIsSubmitting(true);
 
-    // Flatten all answers
-    const allAnswers = pairAnswers.flatMap(pa =>
-      Object.entries(pa.choices).map(([dimId, choice]) => ({
-        evaluationDimensionId: Number(dimId),
-        blindTestPairId: pa.blindTestPairId,
-        blindTestChoice: choice as "left_better" | "same" | "right_better",
-      }))
-    );
+    // Flatten all answers（按 pair 过滤后的维度提交，避免提交组别不适用的相似度维度）
+    const allAnswers = pairAnswers.flatMap((pa, idx) => {
+      const required = dimsForPair(pairs[idx]);
+      const requiredIds = new Set(required.map((d: any) => d.id));
+      return Object.entries(pa.choices)
+        .filter(([dimId]) => requiredIds.has(Number(dimId)))
+        .map(([dimId, choice]) => ({
+          evaluationDimensionId: Number(dimId),
+          blindTestPairId: pa.blindTestPairId,
+          blindTestChoice: choice as "left_better" | "same" | "right_better",
+        }));
+    });
 
     submitMutation.mutate({
       responseId,
@@ -380,6 +404,20 @@ export default function PublicQuestionnaire() {
   const totalPairs = questionnaire.blindTestPairs?.length || 0;
   const progressPercent = ((currentPairIndex + 1) / totalPairs) * 100;
   const currentAnswer = pairAnswers[currentPairIndex];
+
+  // 按盲测题的组别过滤维度：
+  // - 普通维度：所有题目都展示；
+  // - 音色相似度维度：只在其 targetGroups 命中当前题目组别时展示。
+  const filterDimensionsForPair = (pair: any) => {
+    const dims = questionnaire?.dimensions || [];
+    const groupLabel = (pair?.groupLabel || "").trim();
+    return dims.filter((d: any) => {
+      if (d.dimensionType !== "similarity") return true;
+      const groups: string[] = Array.isArray(d.targetGroups) ? d.targetGroups : [];
+      return groupLabel && groups.includes(groupLabel);
+    });
+  };
+  const dimensionsForCurrentPair = filterDimensionsForPair(currentPair);
 
   return (
     <div className="min-h-screen bg-gray-50 py-6 px-4">
@@ -525,14 +563,22 @@ export default function PublicQuestionnaire() {
 
         {/* Evaluation Dimensions */}
         <div className="space-y-3">
-          {questionnaire.dimensions?.map((dim: any) => {
+          {dimensionsForCurrentPair.map((dim: any) => {
             const currentChoice = currentAnswer?.choices[dim.id];
+            const isSimilarity = dim.dimensionType === "similarity";
             return (
-              <Card key={dim.id} className="border border-gray-200">
-                <CardContent className="py-5 px-6">
+              <Card key={dim.id} className={`border ${isSimilarity ? "border-purple-200 bg-purple-50/40" : "border-gray-200"}`}>
+                <CardContent className="py-5 px-6 space-y-3">
                   <div className="flex items-center justify-between gap-4 flex-wrap">
                     <div className="flex-1 min-w-0">
-                      <h4 className="font-bold text-gray-900 text-base">{dim.dimensionName}</h4>
+                      <h4 className="font-bold text-gray-900 text-base">
+                        {dim.dimensionName}
+                        {isSimilarity && (
+                          <span className="ml-2 inline-block rounded-full bg-purple-100 px-2 py-0.5 text-xs font-medium text-purple-700 align-middle">
+                            音色相似度
+                          </span>
+                        )}
+                      </h4>
                       {dim.description && (
                         <p className="text-sm text-gray-500 mt-1 leading-relaxed">{dim.description}</p>
                       )}
@@ -546,7 +592,7 @@ export default function PublicQuestionnaire() {
                             : "border-orange-200 text-orange-600 hover:bg-orange-50 hover:border-orange-300"
                         }`}
                       >
-                        左边更好
+                    左边更好
                       </button>
                       <button
                         onClick={() => handleChoice(dim.id, "same")}
@@ -570,6 +616,20 @@ export default function PublicQuestionnaire() {
                       </button>
                     </div>
                   </div>
+                  {/* 相似度维度：附参考音频播放器（对比左右两边与参考音频的相似度） */}
+                  {isSimilarity && dim.referenceAudio?.fileUrl && (
+                    <div className="rounded-md border border-purple-200 bg-white p-3">
+                      <div className="text-xs text-purple-700 mb-2">
+                        参考音频（判断左右两边哪一边更像下面这段声音）
+                      </div>
+                      <audio
+                        src={dim.referenceAudio.fileUrl}
+                        controls
+                        preload="metadata"
+                        className="w-full"
+                      />
+                    </div>
+                  )}
                 </CardContent>
               </Card>
             );

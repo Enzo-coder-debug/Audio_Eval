@@ -13,35 +13,54 @@ import { localStoragePut } from "./_core/localStorage";
 const USE_LOCAL_STORAGE = process.env.NODE_ENV === "development";
 
 let _s3: S3Client | null = null;
+let _s3Public: S3Client | null = null;
 
-function getS3(): { client: S3Client; bucket: string } {
+function buildS3Client(endpoint: string | undefined): S3Client {
+  return new S3Client({
+    region: ENV.ossRegion,
+    endpoint: endpoint || undefined,
+    forcePathStyle: (process.env.OSS_FORCE_PATH_STYLE ?? "true") !== "false",
+    credentials: {
+      accessKeyId: ENV.ossAccessKeyId,
+      secretAccessKey: ENV.ossSecretAccessKey,
+    },
+    requestHandler: {
+      connectionTimeout: 5000,
+      requestTimeout: 60000,
+    },
+    maxAttempts: 3,
+  });
+}
+
+function assertOssConfig() {
   if (!ENV.ossBucket || !ENV.ossAccessKeyId || !ENV.ossSecretAccessKey) {
     throw new Error(
       "OSS config missing: set OSS_BUCKET / OSS_ACCESS_KEY_ID / OSS_SECRET_ACCESS_KEY",
     );
   }
+}
+
+function getS3(): { client: S3Client; bucket: string } {
+  assertOssConfig();
   if (!_s3) {
-    _s3 = new S3Client({
-      region: ENV.ossRegion,
-      // 京东云 OSS 的 S3 兼容 endpoint,如 https://s3-internal.cn-north-1.jdcloud-oss.com(内网)
-      endpoint: ENV.ossEndpoint || undefined,
-      // 内网 endpoint 下 bucket 子域名(tts-files.s3-internal...)可能无 DNS 解析,
-      // 故默认走 path 风格(s3-internal.../tts-files/key),可用 OSS_FORCE_PATH_STYLE=false 关闭。
-      forcePathStyle: (process.env.OSS_FORCE_PATH_STYLE ?? "true") !== "false",
-      credentials: {
-        accessKeyId: ENV.ossAccessKeyId,
-        secretAccessKey: ENV.ossSecretAccessKey,
-      },
-      // 超时保护:避免网络异常时上传请求无限挂起(此前无任何超时配置)。
-      // connectionTimeout 建连 5s,requestTimeout 单请求 60s(大音频留足余量)。
-      requestHandler: {
-        connectionTimeout: 5000,
-        requestTimeout: 60000,
-      },
-      maxAttempts: 3, // 瞬时网络抖动自动重试(默认 3 次含首次)
-    });
+    // 内网 endpoint(如 s3-internal.cn-north-1.jdcloud-oss.com):容器内上传/读取走内网,速度快、免公网流量。
+    _s3 = buildS3Client(ENV.ossEndpoint);
   }
   return { client: _s3, bucket: ENV.ossBucket };
+}
+
+/**
+ * 用「公网 endpoint」构造的 S3Client,专门用于生成可被手机/外部浏览器访问的预签名 URL。
+ * 预签名 URL 的 host 由 client 的 endpoint 决定且参与签名,故不能只替换字符串,必须用公网 client 重新签名。
+ * 未配置 OSS_PUBLIC_ENDPOINT 时回退到内网 endpoint(仅站内代理可达)。
+ */
+function getS3Public(): { client: S3Client; bucket: string } {
+  assertOssConfig();
+  if (!_s3Public) {
+    const publicEp = ENV.ossPublicEndpoint || ENV.ossEndpoint;
+    _s3Public = buildS3Client(publicEp);
+  }
+  return { client: _s3Public, bucket: ENV.ossBucket };
 }
 
 function normalizeKey(relKey: string): string {
@@ -123,11 +142,12 @@ export function buildPublicUrl(relKey: string): string {
 }
 
 // 生成京东云 OSS 的预签名下载 URL,默认有效期 1 小时。
+// 用公网 endpoint 的 client 签名,保证手机/外部浏览器能直接访问(内网 endpoint 公网不可达)。
 export async function storageGetSignedUrl(
   relKey: string,
   expiresInSeconds = 3600,
 ): Promise<string> {
-  const { client, bucket } = getS3();
+  const { client, bucket } = getS3Public();
   const key = normalizeKey(relKey);
 
   return getSignedUrl(

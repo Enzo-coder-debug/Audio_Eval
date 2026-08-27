@@ -457,6 +457,16 @@ export async function getEvaluationDimensionsByQuestionnaire(questionnaireId: nu
     .orderBy(evaluationDimensions.orderIndex);
 }
 
+export async function getEvaluationDimensionById(id: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+
+  const result = await db.select().from(evaluationDimensions)
+    .where(eq(evaluationDimensions.id, id))
+    .limit(1);
+  return result[0];
+}
+
 export async function updateEvaluationDimension(id: number, updates: Partial<InsertEvaluationDimension>) {
   const db = await getDb();
   if (!db) throw new Error("Database not available");

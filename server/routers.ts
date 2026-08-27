@@ -17,6 +17,26 @@ function getInsertId(result: unknown): number {
   return Number((result as { insertId?: number })?.insertId);
 }
 
+// 默认预置评分维度:所有新问卷创建时自动带入这三个常用维度(音质/自然度/情感表现力)。
+// 释义为产品统一约定,管理员可在问卷详情页按需增删或补充"音色相似度"等特殊维度。
+export const DEFAULT_EVALUATION_DIMENSIONS: { dimensionName: string; description: string }[] = [
+  {
+    dimensionName: "音质",
+    description:
+      "无杂音:单词和句子发音准确,无误读、模糊、含混的情况;段落之间、句子之间过渡平滑,没有不自然的停顿、重复、不连贯情况。",
+  },
+  {
+    dimensionName: "自然度",
+    description:
+      "语调和节奏自然:声音的抑扬顿挫自然,语速符合人们日常的口语表达习惯,听起来自然、流畅,不会有机械的感觉。",
+  },
+  {
+    dimensionName: "情感表现力",
+    description:
+      "音色是否具有真人的表达情感和语境,语调、语速、重音等方面有较好表现。",
+  },
+];
+
 // 从自由文本的"评分标准"中自动解析出评分维度。
 // 支持按换行/分号分隔;每条用冒号/破折号拆出 名称 与 描述。
 // 解析不出有效维度时,回退为单个"整体效果"维度,保证盲测页可正常评分。
@@ -200,7 +220,8 @@ export const appRouter = router({
           groupLabel: z.string().optional(), // 组别(可选),同组不同模型两两配对
         })),
         evaluationCopywriting: z.string(),
-        scoringStandard: z.string(),
+        // 创建问卷不再需要填写指标,scoringStandard 保留为可选(仅存档,不再解析维度)。
+        scoringStandard: z.string().optional().default(""),
       }))
       .mutation(async ({ input, ctx }) => {
         try {
@@ -272,10 +293,10 @@ export const appRouter = router({
             blindTestPairsCount = pairs.length;
           }
 
-          // 根据评分标准文本自动解析并写入评分维度,管理员后续可在详情页增删。
-          const parsedDimensions = parseScoringStandardToDimensions(input.scoringStandard);
+          // 写入默认预置评分维度(音质/自然度/情感表现力),管理员后续可在详情页增删。
+          // 不再从 scoringStandard 文本解析:创建问卷已不需要填写指标。
           await db.createEvaluationDimensions(
-          parsedDimensions.map((d, idx) => ({
+            DEFAULT_EVALUATION_DIMENSIONS.map((d, idx) => ({
               questionnaireId,
               dimensionName: d.dimensionName,
               description: d.description,
@@ -287,7 +308,7 @@ export const appRouter = router({
             questionnaireId,
             uploadedAudios,
             blindTestPairsCount,
-            dimensionsCount: parsedDimensions.length,
+            dimensionsCount: DEFAULT_EVALUATION_DIMENSIONS.length,
           };
         } catch (error) {
           // 打出尽可能完整的错误信息,便于定位 OSS/S3/DB 等底层错误(含 name/code/stack)
@@ -319,7 +340,8 @@ export const appRouter = router({
       .input(z.object({
         title: z.string().min(1, "请填写问卷名称"),
         evaluationCopywriting: z.string(),
-        scoringStandard: z.string(),
+        // 创建问卷不再需要填写指标,scoringStandard 保留为可选(仅存档,不再解析维度)。
+        scoringStandard: z.string().optional().default(""),
       }))
       .mutation(async ({ input, ctx }) => {
         const qResult = await db.createQuestionnaire({
@@ -334,10 +356,9 @@ export const appRouter = router({
         });
         const questionnaireId = getInsertId(qResult);
 
-        // 根据评分标准文本自动解析并写入评分维度,与 upload 接口保持一致。
-        const parsedDimensions = parseScoringStandardToDimensions(input.scoringStandard);
+        // 写入默认预置评分维度(音质/自然度/情感表现力),不再解析 scoringStandard。
         await db.createEvaluationDimensions(
-          parsedDimensions.map((d, idx) => ({
+          DEFAULT_EVALUATION_DIMENSIONS.map((d, idx) => ({
             questionnaireId,
             dimensionName: d.dimensionName,
             description: d.description,
@@ -345,7 +366,7 @@ export const appRouter = router({
           }))
         );
 
-        return { questionnaireId, dimensionsCount: parsedDimensions.length };
+        return { questionnaireId, dimensionsCount: DEFAULT_EVALUATION_DIMENSIONS.length };
       }),
 
     /**
@@ -665,22 +686,44 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
           throw new TRPCError({ code: "NOT_FOUND" });
         }
 
-        // Get blind test pairs with audio info
+        // Get blind test pairs with audio info（附带 groupLabel，供答题端按组条件展示音色相似度维度）
         const pairs = await db.getBlindTestPairsByQuestionnaire(questionnaire.id);
         const pairsWithAudio = await Promise.all(
           pairs.map(async (pair) => {
             const leftAudio = await db.getAudioFileById(pair.leftAudioFileId);
             const rightAudio = await db.getAudioFileById(pair.rightAudioFileId);
+            // 同组的音频组别标签一致，任取其一即可
+            const groupLabel = (leftAudio?.groupLabel || rightAudio?.groupLabel || "").trim() || null;
             return {
               ...pair,
+              groupLabel,
               leftAudio: leftAudio ? { id: leftAudio.id, fileUrl: leftAudio.fileUrl, fileName: leftAudio.fileName } : null,
               rightAudio: rightAudio ? { id: rightAudio.id, fileUrl: rightAudio.fileUrl, fileName: rightAudio.fileName } : null,
             };
           })
         );
 
-        // Get evaluation dimensions
-        const dimensions = await db.getEvaluationDimensionsByQuestionnaire(questionnaire.id);
+        // Get evaluation dimensions，音色相似度维度附带参考音频公网可播放 URL 与目标组别数组
+        const rawDimensions = await db.getEvaluationDimensionsByQuestionnaire(questionnaire.id);
+        const dimensions = await Promise.all(
+          rawDimensions.map(async (d) => {
+            let referenceAudio: { id: number; fileUrl: string; fileName: string } | null = null;
+            let targetGroups: string[] = [];
+            if (d.dimensionType === "similarity") {
+              if (d.referenceAudioFileId) {
+                const ref = await db.getAudioFileById(d.referenceAudioFileId);
+                if (ref) {
+                  referenceAudio = { id: ref.id, fileUrl: ref.fileUrl, fileName: ref.fileName };
+                }
+              }
+              try {
+                const parsed = JSON.parse(d.targetGroupLabels || "[]");
+                if (Array.isArray(parsed)) targetGroups = parsed.filter((v) => typeof v === "string");
+              } catch { /* ignore */ }
+            }
+            return { ...d, referenceAudio, targetGroups };
+          })
+        );
 
         return {
           ...questionnaire,
@@ -730,32 +773,10 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
 
         await db.updateQuestionnaire(input.id, updates);
 
-        // 评分标准文本变更时,自动重新解析并同步评分维度(删旧建新)。
-        // 说明:评分标准变更意味着评价口径改变,历史维度与已产生的作答均已失效,
-        // 因此若已存在作答记录,一并清理,避免旧作答引用已删除的维度导致数据错位。
-        let dimensionsUpdated = false;
-        let dimensionsCount: number | undefined;
-        if (
-          input.scoringStandard !== undefined &&
-          input.scoringStandard !== questionnaire.scoringStandard
-        ) {
-          const respCount = await db.countResponsesByQuestionnaire(input.id);
-          if (respCount > 0) {
-            await db.deleteResponsesByQuestionnaire(input.id);
-          }
-          await db.deleteEvaluationDimensionsByQuestionnaire(input.id);
-          const parsedDimensions = parseScoringStandardToDimensions(input.scoringStandard);
-          await db.createEvaluationDimensions(
-            parsedDimensions.map((d, idx) => ({
-              questionnaireId: input.id,
-              dimensionName: d.dimensionName,
-              description: d.description,
-              orderIndex: idx,
-            }))
-          );
-          dimensionsUpdated = true;
-          dimensionsCount = parsedDimensions.length;
-        }
+        // 评分维度由独立的维度管理接口维护。修改历史评分标准文本不再重建维度，
+        // 避免误删默认维度、音色相似度配置及已有答卷。
+        const dimensionsUpdated = false;
+        const dimensionsCount: number | undefined = undefined;
 
         return { success: true, dimensionsUpdated, dimensionsCount };
       }),
@@ -825,18 +846,35 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
           });
         }
 
-        // 3. 复制评分维度
+        // 3. 复制评分维度（含音色相似度：按原参考音频 fileKey 映射到新问卷对应音频 ID）
         const sourceDimensions = await db.getEvaluationDimensionsByQuestionnaire(input.id);
         if (sourceDimensions.length > 0) {
+          // 建立 原 audioFileId -> fileKey / 新 fileKey -> 新 audioFileId 的映射
+          const oldIdToKey = new Map<number, string>();
+          for (const a of sourceAudios) oldIdToKey.set(a.id, a.fileKey);
+          const newAudios = await db.getAudioFilesByQuestionnaire(newQuestionnaireId);
+          const keyToNewId = new Map<string, number>();
+          for (const a of newAudios) keyToNewId.set(a.fileKey, a.id);
+
           await db.createEvaluationDimensions(
-            sourceDimensions.map((d, idx) => ({
-              questionnaireId: newQuestionnaireId,
-              dimensionName: d.dimensionName,
-              description: d.description,
-              weight: d.weight,
-              maxScore: d.maxScore,
-              orderIndex: d.orderIndex ?? idx,
-            }))
+            sourceDimensions.map((d, idx) => {
+              let refNewId: number | null = null;
+              if (d.dimensionType === "similarity" && d.referenceAudioFileId) {
+                const key = oldIdToKey.get(d.referenceAudioFileId);
+                refNewId = (key && keyToNewId.get(key)) || null;
+              }
+              return {
+     questionnaireId: newQuestionnaireId,
+                dimensionName: d.dimensionName,
+                description: d.description,
+                weight: d.weight,
+                maxScore: d.maxScore,
+                orderIndex: d.orderIndex ?? idx,
+                dimensionType: d.dimensionType,
+                referenceAudioFileId: refNewId,
+                targetGroupLabels: d.dimensionType === "similarity" ? d.targetGroupLabels : null,
+              };
+            })
           );
         }
 
@@ -861,82 +899,74 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
    * Evaluation dimension management
    */
   dimension: router({
-    /**
-     * Create evaluation dimension
-     */
     create: adminProcedure
       .input(z.object({
         questionnaireId: z.number(),
-        dimensionName: z.string().min(1),
+        dimensionName: z.string().trim().min(1),
         description: z.string().optional(),
         weight: z.number().default(1),
         maxScore: z.number().default(10),
         orderIndex: z.number(),
+        dimensionType: z.enum(["normal", "similarity"]).default("normal"),
+        referenceAudioFileId: z.number().int().positive().nullable().optional(),
+        targetGroupLabels: z.array(z.string().trim().min(1)).optional(),
       }))
       .mutation(async ({ input, ctx }) => {
         const questionnaire = await db.getQuestionnaireById(input.questionnaireId);
-        if (!questionnaire || questionnaire.creatorId !== ctx.user.id) {
-          throw new TRPCError({ code: "FORBIDDEN" });
+        if (!questionnaire || questionnaire.creatorId !== ctx.user.id) throw new TRPCError({ code: "FORBIDDEN" });
+        let referenceAudioFileId: number | null = null;
+        let targetGroupLabels: string | null = null;
+        if (input.dimensionType === "similarity") {
+          if (!input.referenceAudioFileId || !input.targetGroupLabels?.length) {
+            throw new TRPCError({ code: "BAD_REQUEST", message: "音色相似度必须选择参考音频和至少一个目标组别" });
+          }
+          const audio = await db.getAudioFileById(input.referenceAudioFileId);
+          const availableGroups = new Set((await db.getAudioFilesByQuestionnaire(input.questionnaireId)).map(a => a.groupLabel?.trim()).filter((v): v is string => Boolean(v)));
+          const labels = Array.from(new Set(input.targetGroupLabels.map(v => v.trim())));
+          if (!audio || audio.questionnaireId !== input.questionnaireId || audio.uploaderId !== ctx.user.id || labels.some(v => !availableGroups.has(v))) {
+            throw new TRPCError({ code: "BAD_REQUEST", message: "参考音频或目标组别不属于当前问卷" });
+          }
+          referenceAudioFileId = input.referenceAudioFileId;
+          targetGroupLabels = JSON.stringify(labels);
         }
-
-        const result = await db.createEvaluationDimension({
-          questionnaireId: input.questionnaireId,
-          dimensionName: input.dimensionName,
-          description: input.description || null,
-          weight: String(input.weight) as any,
-          maxScore: String(input.maxScore) as any,
-          orderIndex: input.orderIndex,
-        });
-
+        const result = await db.createEvaluationDimension({ questionnaireId: input.questionnaireId, dimensionName: input.dimensionName, description: input.description || null, weight: String(input.weight) as any, maxScore: String(input.maxScore) as any, orderIndex: input.orderIndex, dimensionType: input.dimensionType, referenceAudioFileId, targetGroupLabels });
         return { success: true, dimensionId: getInsertId(result) };
       }),
 
-    /**
-     * Get evaluation dimensions for a questionnaire
-     */
-    list: publicProcedure
-      .input(z.object({
-        questionnaireId: z.number(),
-      }))
-      .query(async ({ input }) => {
-        return await db.getEvaluationDimensionsByQuestionnaire(input.questionnaireId);
-      }),
+    list: publicProcedure.input(z.object({ questionnaireId: z.number() })).query(({ input }) => db.getEvaluationDimensionsByQuestionnaire(input.questionnaireId)),
 
-    /**
-     * Update evaluation dimension
-     */
     update: adminProcedure
-      .input(z.object({
-        id: z.number(),
-        dimensionName: z.string().optional(),
-        description: z.string().optional(),
-        weight: z.number().optional(),
-        maxScore: z.number().optional(),
-        orderIndex: z.number().optional(),
-      }))
+      .input(z.object({ id: z.number(), dimensionName: z.string().trim().min(1).optional(), description: z.string().optional(), weight: z.number().optional(), maxScore: z.number().optional(), orderIndex: z.number().optional(), dimensionType: z.enum(["normal", "similarity"]).optional(), referenceAudioFileId: z.number().int().positive().nullable().optional(), targetGroupLabels: z.array(z.string().trim().min(1)).optional() }))
       .mutation(async ({ input, ctx }) => {
-        const updates: any = {};
-        if (input.dimensionName) updates.dimensionName = input.dimensionName;
-        if (input.description) updates.description = input.description;
-        if (input.weight !== undefined) updates.weight = input.weight;
-        if (input.maxScore !== undefined) updates.maxScore = input.maxScore;
-        if (input.orderIndex !== undefined) updates.orderIndex = input.orderIndex;
-
-        await db.updateEvaluationDimension(input.id, updates);
+        const dimension = await db.getEvaluationDimensionById(input.id);
+        const questionnaire = dimension && await db.getQuestionnaireById(dimension.questionnaireId);
+        if (!dimension || !questionnaire || questionnaire.creatorId !== ctx.user.id) throw new TRPCError({ code: "FORBIDDEN" });
+        const type = input.dimensionType ?? dimension.dimensionType;
+        const referenceId = input.referenceAudioFileId === undefined ? dimension.referenceAudioFileId : input.referenceAudioFileId;
+        let labels: string[] = [];
+        try { labels = JSON.parse(dimension.targetGroupLabels || "[]"); } catch { labels = []; }
+        if (input.targetGroupLabels !== undefined) labels = Array.from(new Set(input.targetGroupLabels.map(v => v.trim())));
+        if (type === "similarity") {
+          if (!referenceId || labels.length === 0) throw new TRPCError({ code: "BAD_REQUEST", message: "音色相似度必须选择参考音频和至少一个目标组别" });
+          const audio = await db.getAudioFileById(referenceId);
+          const groups = new Set((await db.getAudioFilesByQuestionnaire(dimension.questionnaireId)).map(a => a.groupLabel?.trim()).filter((v): v is string => Boolean(v)));
+          if (!audio || audio.questionnaireId !== dimension.questionnaireId || audio.uploaderId !== ctx.user.id || labels.some(v => !groups.has(v))) throw new TRPCError({ code: "BAD_REQUEST", message: "参考音频或目标组别不属于当前问卷" });
+        }
+        const { id, targetGroupLabels: _labels, referenceAudioFileId: _reference, ...fields } = input;
+        const updates: any = { ...fields, dimensionType: type, referenceAudioFileId: type === "similarity" ? referenceId : null, targetGroupLabels: type === "similarity" ? JSON.stringify(labels) : null };
+        if (input.weight !== undefined) updates.weight = String(input.weight);
+        if (input.maxScore !== undefined) updates.maxScore = String(input.maxScore);
+        await db.updateEvaluationDimension(id, updates);
         return { success: true };
       }),
 
-    /**
-     * Delete evaluation dimension
-     */
-    delete: adminProcedure
-      .input(z.object({
-        id: z.number(),
-      }))
-      .mutation(async ({ input }) => {
-        await db.deleteEvaluationDimension(input.id);
-        return { success: true };
-      }),
+    delete: adminProcedure.input(z.object({ id: z.number() })).mutation(async ({ input, ctx }) => {
+      const dimension = await db.getEvaluationDimensionById(input.id);
+      const questionnaire = dimension && await db.getQuestionnaireById(dimension.questionnaireId);
+      if (!dimension || !questionnaire || questionnaire.creatorId !== ctx.user.id) throw new TRPCError({ code: "FORBIDDEN" });
+      await db.deleteEvaluationDimension(input.id);
+      return { success: true };
+    }),
   }),
 
   /**
@@ -986,6 +1016,10 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
           visitorToken: visitorToken || null,
           visitorName: input.visitorName,
           status: "in_progress",
+          // 显式用应用层 new Date() 写入,与 submittedAt 走同一 mysql2 +08:00 转换路径。
+          // 否则 startedAt 走 DB 端 defaultNow()(CURRENT_TIMESTAMP,不经 mysql2 时区转换),
+          // 会与 submittedAt 产生 8 小时偏差。
+          startedAt: new Date(),
         });
 
         return {
@@ -1021,6 +1055,8 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
             userId: ctx.user.id,
             questionnaireId: input.questionnaireId,
             status: "in_progress",
+            // 与 submittedAt 统一走应用层 new Date() + mysql2 +08:00 转换,避免时区偏差。
+            startedAt: new Date(),
           });
           response = await db.getResponseById(getInsertId(result));
         }

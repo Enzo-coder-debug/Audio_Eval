@@ -57,6 +57,13 @@
       "when": 1784877194523,
       "tag": "0007_graceful_ironclad",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "5",
+      "when": 1787823997956,
+      "tag": "0008_mean_william_stryker",
+      "breakpoints": true
     }
   ]
 }

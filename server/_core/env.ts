@@ -19,6 +19,10 @@ export const ENV = {
   // OSS 外网访问 Bucket 域名(用于生成可直接播放的公网链接),
   // 如 https://tts-files.s3.cn-north-1.jdcloud-oss.com。留空则回退到 endpoint+bucket 拼接。
   ossPublicBaseUrl: process.env.OSS_PUBLIC_BASE_URL ?? "",
+  // OSS 公网 endpoint(S3 兼容,用于生成可被手机/公网访问的预签名下载 URL),
+  // 如 https://s3.cn-north-1.jdcloud-oss.com。内网 endpoint(s3-internal...)手机不可达,
+  // 故预签名下载必须用公网 endpoint 重新签名。留空则回退到 ossEndpoint(内网,仅站内代理可用)。
+  ossPublicEndpoint: process.env.OSS_PUBLIC_ENDPOINT ?? "",
 
   // 管理员账号密码登录(脱离 Manus OAuth 后的管理端门禁)
   adminUsername: process.env.ADMIN_USERNAME ?? "",
