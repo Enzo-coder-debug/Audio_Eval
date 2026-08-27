@@ -199,8 +199,10 @@ export default function AdminDashboard() {
     }
     // 创建问卷不再需要填写指标(评分标准):后端会自动带入默认预置维度(音质/自然度/情感表现力)。
 
-    // 分片串行上传:每次请求体只含单个音频,避免网关(JDOS ingress 默认 1MB)对大请求体返回 413。
-    // 流程:① 只建问卷+评分维度 → ② 逐个音频 addToQuestionnaire → ③ 全部传完再 generatePairs。
+    // 分片小并发上传:每次请求体只含单个音频(仍受 JDOS ingress 1MB 单请求上限保护,单文件<1MB),
+    // 但客户端用固定窗口并发 UPLOAD_CONCURRENCY 个请求,消除串行 RTT 累加,大幅缩短总耗时。
+    // 流程:① 只建问卷+评分维度 → ② 并发窗口逐个 addToQuestionnaire → ③ 全部传完再 generatePairs。
+    const UPLOAD_CONCURRENCY = 4;
     setIsUploading(true);
     setUploadProgress({ done: 0, total: audioItems.length });
     try {
@@ -210,13 +212,11 @@ export default function AdminDashboard() {
         evaluationCopywriting,
       });
 
-      // ② 逐个音频串行上传(单文件请求体远小于 1MB 上限)
-      for (let i = 0; i < audioItems.length; i++) {
-        const item = audioItems[i];
+      // ② 用固定并发窗口逐个上传(每个请求体单文件,不触发 413;窗口=4 覆盖网络 RTT)
+      const uploadOne = async (item: AudioItem) => {
         let mimeType: "audio/mpeg" | "audio/wav" | "audio/mp4" = "audio/mpeg";
         if (item.file.type === "audio/wav") mimeType = "audio/wav";
         else if (item.file.type === "audio/mp4" || item.file.name.endsWith(".m4a")) mimeType = "audio/mp4";
-
         await addAudioToQuestionnaire.mutateAsync({
           questionnaireId,
           audios: [
@@ -230,8 +230,21 @@ export default function AdminDashboard() {
             },
           ],
         });
-        setUploadProgress({ done: i + 1, total: audioItems.length });
-      }
+      };
+      let cursor = 0;
+      let doneCount = 0;
+      const worker = async () => {
+        while (true) {
+          const idx = cursor++;
+          if (idx >= audioItems.length) return;
+          await uploadOne(audioItems[idx]);
+          doneCount++;
+          setUploadProgress({ done: doneCount, total: audioItems.length });
+        }
+      };
+      await Promise.all(
+        Array.from({ length: Math.min(UPLOAD_CONCURRENCY, audioItems.length) }, () => worker())
+      );
 
       // ③ 全部音频上传完成�统一生成盲测配对
       const { pairsCount } = await generatePairs.mutateAsync({ questionnaireId });

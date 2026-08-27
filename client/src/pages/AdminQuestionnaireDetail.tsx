@@ -106,15 +106,8 @@ export default function AdminQuestionnaireDetail() {
   const questionnaireAudios = audioData?.audios || [];
   const audioResponseCount = audioData?.responseCount || 0;
 
-  const { mutate: addAudio, isPending: isAddingAudio } =
+  const { mutateAsync: addAudioAsync, isPending: isAddingAudio } =
     trpc.audio.addToQuestionnaire.useMutation({
-      onSuccess: () => {
-        toast.success("音频已添加，请设置组别后点击「生成盲测配对」");
-        setPendingAudios([]);
-        if (audioInputRef.current) audioInputRef.current.value = "";
-        refetchAudios();
-        refetchResponses();
-      },
       onError: (error) => toast.error(error.message || "添加失败"),
     });
 
@@ -363,7 +356,10 @@ export default function AdminQuestionnaireDetail() {
     setPendingAudios((prev) => prev.filter((_, i) => i !== index));
   };
 
-  // 新增音频:等这一批全部选好并填好模型名后,一次性上传(不自动配对,组别可选)
+  // 新增音频:待批处理列表全部选好并填好模型名后,拆成单文件请求 + 客户端窗口并发上传
+  // (每个请求体只带一个音频,不触碰 JDOS ingress 1MB 上限;并发窗口=4 消除串行 RTT 累加)
+  const UPLOAD_CONCURRENCY = 4;
+  const [addAudioProgress, setAddAudioProgress] = useState<{ done: number; total: number } | null>(null);
   const handleAddAudio = async () => {
     if (pendingAudios.length === 0) {
       toast.error("请先选择音频文件");
@@ -373,16 +369,43 @@ export default function AdminQuestionnaireDetail() {
       toast.error("请为每个待上传音频填写模型名称");
       return;
     }
+    setAddAudioProgress({ done: 0, total: pendingAudios.length });
     try {
-      const audios = await Promise.all(
-        pendingAudios.map(async (it) => {
-          const base = await readAudioForUpload(it.file);
-          return { ...base, modelName: it.modelName.trim(), groupLabel: it.groupLabel.trim() || undefined };
-        })
+      const items = pendingAudios.map((it) => ({
+        file: it.file,
+        modelName: it.modelName.trim(),
+        groupLabel: it.groupLabel.trim() || undefined,
+      }));
+      const uploadOne = async (it: { file: File; modelName: string; groupLabel?: string }) => {
+        const base = await readAudioForUpload(it.file);
+        await addAudioAsync({
+          questionnaireId,
+          audios: [{ ...base, modelName: it.modelName, groupLabel: it.groupLabel }],
+        });
+      };
+      let cursor = 0;
+      let doneCount = 0;
+      const worker = async () => {
+        while (true) {
+          const idx = cursor++;
+          if (idx >= items.length) return;
+          await uploadOne(items[idx]);
+          doneCount++;
+          setAddAudioProgress({ done: doneCount, total: items.length });
+        }
+      };
+      await Promise.all(
+        Array.from({ length: Math.min(UPLOAD_CONCURRENCY, items.length) }, () => worker())
       );
-      addAudio({ questionnaireId, audios });
-    } catch (e) {
-      toast.error("文件读取失败");
+      toast.success("音频已添加，请设置组别后点击「生成盲测配对」");
+      setPendingAudios([]);
+      if (audioInputRef.current) audioInputRef.current.value = "";
+      refetchAudios();
+      refetchResponses();
+    } catch (e: any) {
+      toast.error(e?.message || "文件读取或上传失败");
+    } finally {
+      setAddAudioProgress(null);
     }
   };
 
@@ -1060,10 +1083,14 @@ export default function AdminQuestionnaireDetail() {
                 <Button
                   className="bg-blue-600 hover:bg-blue-700"
                   onClick={handleAddAudio}
-                  disabled={isAddingAudio || pendingAudios.length === 0}
+                  disabled={!!addAudioProgress || isAddingAudio || pendingAudios.length === 0}
                 >
                   <Plus className="w-4 h-4 mr-2" />
-                  {isAddingAudio ? "上传中..." : `上传音频（${pendingAudios.length}）`}
+                  {addAudioProgress
+                    ? `上传中 ${addAudioProgress.done}/${addAudioProgress.total}...`
+                    : isAddingAudio
+                    ? "上传中..."
+                    : `上传音频（${pendingAudios.length}）`}
                 </Button>
               </CardContent>
             </Card>
