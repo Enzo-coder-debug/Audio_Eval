@@ -1260,29 +1260,43 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
             db.getBlindTestPairsByQuestionnaire(response.questionnaireId),
             db.getEvaluationDimensionsByQuestionnaire(response.questionnaireId),
           ]);
-          // 抽样发放:若本答卷锚定了抽样子集(sampledGroupLabels),校验范围缩到抽中组内的 pairs。
+          // 抽样发放:若本问卷锚定了抽样子集(sampledGroupLabels),校验范围缩到抽中组内的 pairs。
           // 未抽样(null)则保持全量校验,不影响存量问卷。
           const sampled = parseSampledGroupLabels(response.sampledGroupLabels);
-          let scopedPairs = pairs;
-          if (sampled) {
-            const sampledSet = new Set(sampled);
-            const filtered: typeof pairs = [];
-            for (const p of pairs) {
+          // 为每条盲测 pair 解析其组别(groupLabel),供抽样过滤与"音色相似度维度按组限定"共用。
+          const pairsWithLabel = await Promise.all(
+            pairs.map(async (p) => {
               const leftAudio = await db.getAudioFileById(p.leftAudioFileId);
               const rightAudio = await db.getAudioFileById(p.rightAudioFileId);
-              const label = (leftAudio?.groupLabel || rightAudio?.groupLabel || "").trim();
-              if (label && sampledSet.has(label)) filtered.push(p);
-            }
-            scopedPairs = filtered;
+              return { pair: p, label: (leftAudio?.groupLabel || rightAudio?.groupLabel || "").trim() };
+            }),
+          );
+          let scopedPairs = pairsWithLabel;
+          if (sampled) {
+            const sampledSet = new Set(sampled);
+            scopedPairs = pairsWithLabel.filter(({ label }) => label && sampledSet.has(label));
           }
           if (scopedPairs.length > 0 && dims.length > 0) {
             const submitted = new Set(
               input.answers
-                .filter(a => a.blindTestPairId != null && a.evaluationDimensionId != null && a.blindTestChoice != null)
+                .filter(a => a?.blindTestPairId != null && a?.evaluationDimensionId != null && a?.blindTestChoice != null)
                 .map(a => `${a.blindTestPairId}:${a.evaluationDimensionId}`),
             );
-            const missing = scopedPairs.some(p =>
-              dims.some(d => !submitted.has(`${p.id}:${d.id}`)),
+            // 逐条盲测按"适用维度"校验,与前端 filterDimensionsForPair 口径一致:
+            // - 普通维度:所有题目都必答;
+            // - 音色相似度维度:仅在其 targetGroups 命中该题组别的题目上必答,否则跳过。
+            const missing = scopedPairs.some(({ pair, label }) =>
+              dims.some((d) => {
+                if (d.dimensionType === "similarity") {
+                  let targetGroups: string[] = [];
+                  try {
+                    const parsed = JSON.parse(d.targetGroupLabels || "[]");
+                    if (Array.isArray(parsed)) targetGroups = parsed.filter((v) => typeof v === "string");
+                  } catch { /* ignore */ }
+                  if (!label || !targetGroups.includes(label)) return false; // 该题不适用相似度维度,跳过
+                }
+                return !submitted.has(`${pair.id}:${d.id}`);
+              }),
             );
             if (missing) {
               throw new TRPCError({
