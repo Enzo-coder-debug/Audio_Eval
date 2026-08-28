@@ -68,6 +68,7 @@ export const questionnaires = mysqlTable("questionnaires", {
   description: text("description"),
   evaluationCopywriting: longtext("evaluationCopywriting"),
   scoringStandard: longtext("scoringStandard"),
+  sampleSize: int("sampleSize"), // 发放样本组数:每个答卷人随机抽取的 groupLabel 组数;null/<=0 表示发放全部组
   status: mysqlEnum("status", ["draft", "published", "offline"]).default("draft").notNull(),
   shareToken: varchar("shareToken", { length: 64 }).unique(),
   validFrom: timestamp("validFrom"),
@@ -133,6 +134,7 @@ export const responses = mysqlTable("responses", {
   visitorIp: varchar("visitorIp", { length: 45 }),
   visitorToken: varchar("visitorToken", { length: 64 }), // 浏览器级稳定标识(localStorage UUID),用于区分同 IP 的不同访客
   visitorName: varchar("visitorName", { length: 255 }),
+  sampledGroupLabels: json("sampledGroupLabels"), // 抽样发放:该答卷抽中的 groupLabel 数组(锚定每人固定子集);null 表示不抽样、发放全部
   status: mysqlEnum("status", ["in_progress", "submitted", "graded"]).default("in_progress").notNull(),
   totalScore: decimal("totalScore", { precision: 5, scale: 2 }),
   aiComments: longtext("aiComments"),

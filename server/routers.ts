@@ -123,6 +123,34 @@ export function buildBlindTestPairs(
   }));
 }
 
+// 收集某问卷全部去重后的组别(groupLabel)。pair 本身不存组别,须从左右音频取。
+// 用于抽样发放:以组别为抽样单位。
+async function collectQuestionnaireGroupLabels(questionnaireId: number): Promise<string[]> {
+  const pairs = await db.getBlindTestPairsByQuestionnaire(questionnaireId);
+  const labels = new Set<string>();
+  for (const pair of pairs) {
+    const leftAudio = await db.getAudioFileById(pair.leftAudioFileId);
+    const rightAudio = await db.getAudioFileById(pair.rightAudioFileId);
+    const label = (leftAudio?.groupLabel || rightAudio?.groupLabel || "").trim();
+    if (label) labels.add(label);
+  }
+  return Array.from(labels);
+}
+
+// 解析 responses.sampledGroupLabels(JSON 字符串)为 string[] | null。
+// null / 空 / 非法一律归一为 null(表示未抽样,发放全部组)。
+function parseSampledGroupLabels(raw: unknown): string[] | null {
+  if (raw == null) return null;
+  try {
+    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (Array.isArray(parsed)) {
+      const arr = parsed.filter((v) => typeof v === "string");
+      return arr.length > 0 ? arr : null;
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
 // 重建某问卷的盲测配对:取当前问卷音频(已直接归属问卷) -> 清空旧作答与旧配对
 // -> 按 groupLabel 分组重新生成配对。
 // 由于旧配对与旧答案(answers.blindTestPairId)绑定,音频/组别变化会让旧作答失去意义,
@@ -748,6 +776,7 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
         status: z.enum(["draft", "published", "offline"]).optional(),
         validFrom: z.date().optional(),
         validUntil: z.date().optional(),
+        sampleSize: z.number().int().min(0).nullable().optional(), // 发放样本组数;0/null=发放全部组
       }))
       .mutation(async ({ input, ctx }) => {
         const questionnaire = await db.getQuestionnaireById(input.id);
@@ -773,6 +802,11 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
         }
         if (input.validFrom) updates.validFrom = input.validFrom;
         if (input.validUntil) updates.validUntil = input.validUntil;
+
+        // 发放样本组数:0 或 null 都归一为 null(发放全部组);>0 则按组抽样
+        if (input.sampleSize !== undefined) {
+          updates.sampleSize = input.sampleSize && input.sampleSize > 0 ? input.sampleSize : null;
+        }
 
         await db.updateQuestionnaire(input.id, updates);
 
@@ -1052,18 +1086,19 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
 
         const visitorIp = ((ctx.req.headers["x-forwarded-for"] as string) || "").split(",")[0] || ctx.req.socket?.remoteAddress || "unknown";
         const visitorToken = input.visitorToken || "";
+        const visitorName = input.visitorName;
 
-        // 复用同问卷、同浏览器 token 未提交的 in_progress 记录,避免同一个人每次进入都新建脏数据。
-        // 按 token(而非 IP)匹配:同 IP 下的不同访客有各自不同的 token,不会互相复用。
-        if (visitorToken) {
-          const existing = await db.findInProgressResponse(input.questionnaireId, visitorToken);
+        // 复用同问卷、同 IP、同姓名未提交的 in_progress 记录,避免同一个人每次进入都新建脏数据。
+        // 唯一键用 IP+姓名(而非 visitorToken):同一浏览器换姓名即视为不同答卷人,不会复用/覆盖他人答卷。
+        if (visitorIp && visitorName) {
+          const existing = await db.findInProgressResponse(input.questionnaireId, visitorIp, visitorName);
           if (existing) {
-            // 更新访客姓名(可能本次填写了新名字),继续沿用该记录
-            await db.updateResponse(existing.id, { visitorName: input.visitorName });
             // 同时把该记录已保存的 answers 快照返回,供前端水合"中途退出前的作答进度"
             const savedAnswers = await db.getAnswersByResponse(existing.id);
             return {
               responseId: existing.id,
+              // 沿用该答卷已锚定的抽样子集(断点续答须固定,不可重抽)
+              sampledGroupLabels: parseSampledGroupLabels(existing.sampledGroupLabels),
               savedAnswers: savedAnswers.map(a => ({
                 blindTestPairId: a.blindTestPairId,
                 evaluationDimensionId: a.evaluationDimensionId,
@@ -1073,12 +1108,30 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
           }
         }
 
+        // 抽样发放:问卷设了 sampleSize(>0)时,从全部组别(groupLabel)随机抽 min(sampleSize, 总组数) 个,
+        // 锚定到本答卷。抽中的组内所有 pair 全发;之后加载/校验都以此子集为准,保证每人固定、可追溯。
+        let sampledGroupLabels: string[] | null = null;
+        if (questionnaire.sampleSize && questionnaire.sampleSize > 0) {
+          const allGroups = await collectQuestionnaireGroupLabels(input.questionnaireId as number);
+          if (allGroups.length > 0) {
+            const take = Math.min(questionnaire.sampleSize, allGroups.length);
+            // Fisher-Yates 打乱后取前 take 个
+            const shuffled = [...allGroups];
+            for (let i = shuffled.length - 1; i > 0; i--) {
+              const j = Math.floor(Math.random() * (i + 1));
+              [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+            }
+            sampledGroupLabels = shuffled.slice(0, take);
+          }
+        }
+
         const result = await db.createAnonymousResponse({
           questionnaireId: input.questionnaireId as number,
           visitorIp,
           visitorToken: visitorToken || null,
           visitorName: input.visitorName,
           status: "in_progress",
+          sampledGroupLabels: sampledGroupLabels ? JSON.stringify(sampledGroupLabels) : null,
           // 显式用应用层 new Date() 写入,与 submittedAt 走同一 mysql2 +08:00 转换路径。
           // 否则 startedAt 走 DB 端 defaultNow()(CURRENT_TIMESTAMP,不经 mysql2 时区转换),
           // 会与 submittedAt 产生 8 小时偏差。
@@ -1087,6 +1140,7 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
 
         return {
           responseId: getInsertId(result),
+          sampledGroupLabels,
           savedAnswers: [] as Array<{ blindTestPairId: number | null; evaluationDimensionId: number | null; blindTestChoice: string | null }>,
         };
       }),
@@ -1206,19 +1260,34 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
             db.getBlindTestPairsByQuestionnaire(response.questionnaireId),
             db.getEvaluationDimensionsByQuestionnaire(response.questionnaireId),
           ]);
-          if (pairs.length > 0 && dims.length > 0) {
+          // 抽样发放:若本答卷锚定了抽样子集(sampledGroupLabels),校验范围缩到抽中组内的 pairs。
+          // 未抽样(null)则保持全量校验,不影响存量问卷。
+          const sampled = parseSampledGroupLabels(response.sampledGroupLabels);
+          let scopedPairs = pairs;
+          if (sampled) {
+            const sampledSet = new Set(sampled);
+            const filtered: typeof pairs = [];
+            for (const p of pairs) {
+              const leftAudio = await db.getAudioFileById(p.leftAudioFileId);
+              const rightAudio = await db.getAudioFileById(p.rightAudioFileId);
+              const label = (leftAudio?.groupLabel || rightAudio?.groupLabel || "").trim();
+              if (label && sampledSet.has(label)) filtered.push(p);
+            }
+            scopedPairs = filtered;
+          }
+          if (scopedPairs.length > 0 && dims.length > 0) {
             const submitted = new Set(
               input.answers
                 .filter(a => a.blindTestPairId != null && a.evaluationDimensionId != null && a.blindTestChoice != null)
                 .map(a => `${a.blindTestPairId}:${a.evaluationDimensionId}`),
             );
-            const missing = pairs.some(p =>
+            const missing = scopedPairs.some(p =>
               dims.some(d => !submitted.has(`${p.id}:${d.id}`)),
             );
             if (missing) {
               throw new TRPCError({
                 code: "BAD_REQUEST",
-                message: `答卷不完整:需完成全部 ${pairs.length} 组 × ${dims.length} 个维度的评分后才能提交`,
+                message: `答卷不完整:需完成全部 ${scopedPairs.length} 组 × ${dims.length} 个维度的评分后才能提交`,
               });
             }
           }
@@ -1245,12 +1314,13 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
           submittedAt: new Date(),
         });
 
-        // 清理同问卷、同浏览器 token 的其他残留 in_progress 记录(避免"填写进展/答卷详情"出现脏数据)。
-        // 按 visitorToken 而非 IP:避免误删同一 IP 下其他访客正在进行的答卷。
-        if (response.visitorToken && response.questionnaireId) {
+        // 清理同问卷、同 IP、同姓名的其他残留 in_progress 记录(避免"填写进展/答卷详情"出现脏数据)。
+        // 按 IP+姓名而非 token:避免误删同一 IP 下其他访客(不同姓名)正在进行的答卷。
+        if (response.visitorIp && response.visitorName && response.questionnaireId) {
           await db.deleteStaleInProgressResponses(
             response.questionnaireId,
-            response.visitorToken,
+            response.visitorIp,
+            response.visitorName,
             input.responseId,
           );
         }

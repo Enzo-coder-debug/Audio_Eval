@@ -57,6 +57,8 @@ export default function AdminQuestionnaireDetail() {
   // 编辑评分标准(保存后自动重新解析并同步维度)
   const [isStandardDialogOpen, setIsStandardDialogOpen] = useState(false);
   const [standardDraft, setStandardDraft] = useState("");
+  const [isSampleDialogOpen, setIsSampleDialogOpen] = useState(false);
+  const [sampleSizeDraft, setSampleSizeDraft] = useState("");
   const [expandedResponseId, setExpandedResponseId] = useState<number | null>(null);
 
   // 音频管理:待新增音频列表(支持一次选多个,填好模型名后一次性上传+配对)
@@ -227,6 +229,30 @@ export default function AdminQuestionnaireDetail() {
     }
     // 后端已停止在 update 时依据评分标准重建维度，这里只是纯文本存档
     updateStandard({ id: questionnaireId, scoringStandard: standardDraft });
+  };
+
+  // 保存发放组数(抽样):留空/0 表示发放全部组，>0 表示每位答卷人随机抽取该数量的组别
+  const handleSaveSampleSize = () => {
+    const trimmed = sampleSizeDraft.trim();
+    let sampleSize: number | null = null;
+    if (trimmed !== "") {
+      const parsed = Number(trimmed);
+      if (!Number.isFinite(parsed) || parsed < 0 || !Number.isInteger(parsed)) {
+        toast.error("请输入非负整数");
+        return;
+      }
+      sampleSize = parsed;
+    }
+    updateStandard(
+      { id: questionnaireId, sampleSize },
+      {
+        onSuccess: () => {
+          toast.success(sampleSize && sampleSize > 0 ? `已设为随机抽取 ${sampleSize} 组` : "已设为发放全部组");
+          setIsSampleDialogOpen(false);
+          refetchQuestionnaire();
+        },
+      }
+    );
   };
 
   const resetDimensionForm = () => {
@@ -739,6 +765,55 @@ export default function AdminQuestionnaireDetail() {
                           className="bg-blue-600 hover:bg-blue-700"
                           disabled={isUpdatingStandard}
                           onClick={handleSaveStandard}
+                        >
+                          {isUpdatingStandard ? "保存中..." : "保存"}
+                        </Button>
+                      </div>
+                    </div>
+                  </DialogContent>
+                </Dialog>
+                <Dialog open={isSampleDialogOpen} onOpenChange={setIsSampleDialogOpen}>
+                  <DialogTrigger asChild>
+                    <Button
+                      variant="outline"
+                      onClick={() =>
+                        setSampleSizeDraft(
+                          questionnaire?.sampleSize ? String(questionnaire.sampleSize) : ""
+                        )
+             }
+                    >
+                      发放组数
+                      {questionnaire?.sampleSize ? `（抽 ${questionnaire.sampleSize} 组）` : "（全部）"}
+                    </Button>
+                  </DialogTrigger>
+                  <DialogContent className="max-w-md">
+                    <DialogHeader>
+                      <DialogTitle>设置发放组数</DialogTitle>
+                      <DialogDescription>
+                        设定每位答卷人随机测评的组别数量。留空或填 0 表示发放全部组；填写正整数则每人随机抽取该数量的组（同一人固定，可断点续答）。超出总组数时自动按全部发放。
+                      </DialogDescription>
+                    </DialogHeader>
+                    <div className="space-y-4">
+                      <div className="space-y-2">
+                        <Label htmlFor="sampleSizeDraft">发放组数</Label>
+                        <Input
+                          id="sampleSizeDraft"
+                          type="number"
+                          min={0}
+                          step={1}
+                          placeholder="留空或 0 = 发放全部组"
+                          value={sampleSizeDraft}
+                          onChange={(e) => setSampleSizeDraft(e.target.value)}
+                        />
+                      </div>
+                      <div className="flex justify-end gap-2">
+                        <Button variant="outline" onClick={() => setIsSampleDialogOpen(false)}>
+                          取消
+                        </Button>
+                        <Button
+                          className="bg-blue-600 hover:bg-blue-700"
+                          disabled={isUpdatingStandard}
+                          onClick={handleSaveSampleSize}
                         >
                           {isUpdatingStandard ? "保存中..." : "保存"}
                         </Button>

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import { useParams } from "wouter";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
@@ -72,6 +72,9 @@ export default function PublicQuestionnaire() {
   // 断点续答需要"数据加载完成后再跳转"到 savedIdx,避免 questionnaire 还没到就被裁剪掉
   const [pendingResumeIndex, setPendingResumeIndex] = useState<number | null>(null);
 
+  // 抽样发放:startPublic 返回该答卷锚定的抽样组别子集(null = 未抽样,发放全部组)。
+  const [sampledGroupLabels, setSampledGroupLabels] = useState<string[] | null>(null);
+
   // Audio player state
   const [leftPlaying, setLeftPlaying] = useState(false);
   const [rightPlaying, setRightPlaying] = useState(false);
@@ -90,11 +93,23 @@ export default function PublicQuestionnaire() {
     { enabled: !!shareToken }
   );
 
+  // 抽样发放:实际参与答题的 pairs 集合。未抽样(sampledGroupLabels=null)时为全部;
+  // 抽样时仅保留抽中组别(groupLabel)内的 pairs。pairAnswers/进度/提交/导航/渲染统一以此为准,
+  // 避免只在展示层过滤导致 index 与 pairAnswers 错位。
+  const visiblePairs = useMemo(() => {
+    const all = (questionnaire?.blindTestPairs || []) as any[];
+    if (!sampledGroupLabels || sampledGroupLabels.length === 0) return all;
+    const set = new Set(sampledGroupLabels);
+    return all.filter((p: any) => set.has((p?.groupLabel || "").trim()));
+  }, [questionnaire?.blindTestPairs, sampledGroupLabels]);
+
   // Start response mutation
   const startMutation = trpc.response.startPublic.useMutation({
     onSuccess: (data) => {
       setResponseId(data.responseId);
       setHasStarted(true);
+      // 抽样发放:锚定后端返回的组别子集(可能为 null=全部)。后续 pairs 全部按此过滤。
+      setSampledGroupLabels(data.sampledGroupLabels ?? null);
       // 断点续答:后端返回该 response 之前中途保存过的 answers 快照,先存下来,
       // 等 questionnaire.blindTestPairs 到位的 useEffect 里再水合进 pairAnswers。
       setSavedAnswersSnapshot(data.savedAnswers ?? []);
@@ -136,7 +151,7 @@ export default function PublicQuestionnaire() {
   // 额外:如果 startPublic 带回了 savedAnswersSnapshot(断点续答),这里把它水合进 choices,
   // 消费后清空 snapshot,防止后续 refetch 触发的重跑再次覆盖用户新的作答。
   useEffect(() => {
-    const pairs = questionnaire?.blindTestPairs;
+    const pairs = visiblePairs;
     if (!pairs) return;
     setPairAnswers((prev) => {
       const prevById = new Map(prev.map((p) => [p.blindTestPairId, p]));
@@ -173,7 +188,7 @@ export default function PublicQuestionnaire() {
     }
     // 用 pair id 序列作为依赖签名,避免对象引用变化触发重置
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [questionnaire?.blindTestPairs?.map((p: any) => p.id).join(",")]);
+  }, [visiblePairs.map((p: any) => p.id).join(",")]);
 
   // Audio player handlers
   const toggleLeftAudio = () => {
@@ -270,7 +285,7 @@ export default function PublicQuestionnaire() {
   useEffect(() => {
     if (!hasStarted || responseId == null || isCompleted || isSubmitting) return;
     const dims = (questionnaire?.dimensions || []) as any[];
-    const pairs = (questionnaire?.blindTestPairs || []) as any[];
+    const pairs = visiblePairs;
     if (pairs.length === 0) return;
     const dimsForPair = (pair: any) => {
       const groupLabel = (pair?.groupLabel || "").trim();
@@ -299,7 +314,7 @@ export default function PublicQuestionnaire() {
     return () => window.clearTimeout(timer);
     // saveProgressMutation 引用稳定,不放入依赖避免无谓重跑
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pairAnswers, hasStarted, responseId, isCompleted, isSubmitting, questionnaire?.dimensions, questionnaire?.blindTestPairs]);
+  }, [pairAnswers, hasStarted, responseId, isCompleted, isSubmitting, questionnaire?.dimensions, visiblePairs]);
 
   // Handle choice selection
   const handleChoice = (dimensionId: number, choice: BlindTestChoice) => {
@@ -323,7 +338,7 @@ export default function PublicQuestionnaire() {
     if (!questionnaire?.dimensions || questionnaire.dimensions.length === 0) return true;
     const currentAnswer = pairAnswers[currentPairIndex];
     if (!currentAnswer) return false;
-    const currentPair = questionnaire.blindTestPairs?.[currentPairIndex];
+    const currentPair = visiblePairs[currentPairIndex];
     // 相似度维度按组别过滤：不适用于当前组的相似度维度视为「无需作答」
     const groupLabel = (currentPair?.groupLabel || "").trim();
     const dimsForPair = (questionnaire.dimensions as any[]).filter((d: any) => {
@@ -341,7 +356,7 @@ export default function PublicQuestionnaire() {
       toast.error("请完成所有维度的评分");
       return;
     }
-    if (questionnaire && currentPairIndex < questionnaire.blindTestPairs.length - 1) {
+    if (questionnaire && currentPairIndex < visiblePairs.length - 1) {
       setCurrentPairIndex(prev => prev + 1);
     }
   };
@@ -367,7 +382,7 @@ export default function PublicQuestionnaire() {
     // 出现「判断次数 < 满额(组数×维度数)」的残缺样本(如 12/18)。
     // 注意:音色相似度维度按组别限定，只在命中组别的题目上要求作答。
     const dims = (questionnaire?.dimensions || []) as any[];
-    const pairs = (questionnaire?.blindTestPairs || []) as any[];
+    const pairs = visiblePairs;
     const total = pairs.length;
     const dimsForPair = (pair: any) => {
       const groupLabel = (pair?.groupLabel || "").trim();
@@ -462,7 +477,9 @@ export default function PublicQuestionnaire() {
                 <p className="text-gray-600 mt-2">{questionnaire.description}</p>
               )}
               <p className="text-sm text-gray-500 mt-4">
-                共 {questionnaire.blindTestPairs?.length || 0} 组音频对比
+                {(questionnaire as any).sampleSize && (questionnaire as any).sampleSize > 0
+                  ? `将从题库中随机抽取 ${(questionnaire as any).sampleSize} 组供你测评`
+                  : `共 ${questionnaire.blindTestPairs?.length || 0} 组音频对比`}
                 {questionnaire.dimensions?.length > 0 && `，${questionnaire.dimensions.length} 个评分维度`}
               </p>
             </div>
@@ -515,8 +532,8 @@ export default function PublicQuestionnaire() {
   }
 
   // Main blind test interface
-  const currentPair = questionnaire.blindTestPairs?.[currentPairIndex];
-  const totalPairs = questionnaire.blindTestPairs?.length || 0;
+  const currentPair = visiblePairs[currentPairIndex];
+  const totalPairs = visiblePairs.length;
   const progressPercent = ((currentPairIndex + 1) / totalPairs) * 100;
   const currentAnswer = pairAnswers[currentPairIndex];
 
