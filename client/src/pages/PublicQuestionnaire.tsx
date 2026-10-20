@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useMemo } from "react";
 import { useParams } from "wouter";
 import { trpc } from "@/lib/trpc";
+import { getEmotionCategories, isDimensionApplicable } from "@shared/evaluationDimensions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
@@ -290,9 +291,7 @@ export default function PublicQuestionnaire() {
     const dimsForPair = (pair: any) => {
       const groupLabel = (pair?.groupLabel || "").trim();
       return dims.filter((d: any) => {
-        if (d.dimensionType !== "similarity") return true;
-        const groups: string[] = Array.isArray(d.targetGroups) ? d.targetGroups : [];
-        return groupLabel && groups.includes(groupLabel);
+        return isDimensionApplicable(d, groupLabel);
       });
     };
     const allAnswers = pairAnswers.flatMap((pa, idx) => {
@@ -339,12 +338,10 @@ export default function PublicQuestionnaire() {
     const currentAnswer = pairAnswers[currentPairIndex];
     if (!currentAnswer) return false;
     const currentPair = visiblePairs[currentPairIndex];
-    // 相似度维度按组别过滤：不适用于当前组的相似度维度视为「无需作答」
+    // 特殊维度按组别过滤：不适用于当前组的维度视为「无需作答」
     const groupLabel = (currentPair?.groupLabel || "").trim();
     const dimsForPair = (questionnaire.dimensions as any[]).filter((d: any) => {
-      if (d.dimensionType !== "similarity") return true;
-      const groups: string[] = Array.isArray(d.targetGroups) ? d.targetGroups : [];
-      return groupLabel && groups.includes(groupLabel);
+      return isDimensionApplicable(d, groupLabel);
     });
     if (dimsForPair.length === 0) return true;
     return dimsForPair.every((dim: any) => currentAnswer.choices[dim.id] !== undefined);
@@ -380,16 +377,14 @@ export default function PublicQuestionnaire() {
     // 就阻止提交并跳转到第一处未完成的组。
     // 背景:此前 flatMap 只收集有作答的组,漏答的组不会生成 answer,导致提交后
     // 出现「判断次数 < 满额(组数×维度数)」的残缺样本(如 12/18)。
-    // 注意:音色相似度维度按组别限定，只在命中组别的题目上要求作答。
+    // 注意:音色相似度和情绪准确度维度按组别限定，只在命中组别的题目上要求作答。
     const dims = (questionnaire?.dimensions || []) as any[];
     const pairs = visiblePairs;
     const total = pairs.length;
     const dimsForPair = (pair: any) => {
       const groupLabel = (pair?.groupLabel || "").trim();
       return dims.filter((d: any) => {
-        if (d.dimensionType !== "similarity") return true;
-        const groups: string[] = Array.isArray(d.targetGroups) ? d.targetGroups : [];
-        return groupLabel && groups.includes(groupLabel);
+        return isDimensionApplicable(d, groupLabel);
       });
     };
     if (dims.length > 0 && total > 0) {
@@ -408,7 +403,7 @@ export default function PublicQuestionnaire() {
 
     setIsSubmitting(true);
 
-    // Flatten all answers（按 pair 过滤后的维度提交，避免提交组别不适用的相似度维度）
+    // Flatten all answers（按 pair 过滤后的维度提交，避免提交组别不适用的特殊维度）
     const allAnswers = pairAnswers.flatMap((pa, idx) => {
       const required = dimsForPair(pairs[idx]);
       const requiredIds = new Set(required.map((d: any) => d.id));
@@ -539,14 +534,12 @@ export default function PublicQuestionnaire() {
 
   // 按盲测题的组别过滤维度：
   // - 普通维度：所有题目都展示；
-  // - 音色相似度维度：只在其 targetGroups 命中当前题目组别时展示。
+  // - 特殊维度：只在目标组别或情绪类别配置命中当前题目组别时展示。
   const filterDimensionsForPair = (pair: any) => {
     const dims = questionnaire?.dimensions || [];
     const groupLabel = (pair?.groupLabel || "").trim();
     return dims.filter((d: any) => {
-      if (d.dimensionType !== "similarity") return true;
-      const groups: string[] = Array.isArray(d.targetGroups) ? d.targetGroups : [];
-      return groupLabel && groups.includes(groupLabel);
+      return isDimensionApplicable(d, groupLabel);
     });
   };
   const dimensionsForCurrentPair = filterDimensionsForPair(currentPair);
@@ -698,6 +691,10 @@ export default function PublicQuestionnaire() {
           {dimensionsForCurrentPair.map((dim: any) => {
             const currentChoice = currentAnswer?.choices[dim.id];
             const isSimilarity = dim.dimensionType === "similarity";
+            const isEmotionAccuracy = dim.dimensionType === "emotion_accuracy";
+            const groupLabel = (currentPair.groupLabel || "").trim();
+            const targetEmotion = getEmotionCategories(dim.emotionCategories)
+              .find(category => category.groupLabels.includes(groupLabel))?.name;
             return (
               <Card key={dim.id} className={`border ${isSimilarity ? "border-purple-200 bg-purple-50/40" : "border-gray-200"}`}>
                 <CardContent className="py-5 px-6 space-y-3">
@@ -710,7 +707,17 @@ export default function PublicQuestionnaire() {
                             音色相似度
                           </span>
                         )}
+                        {isEmotionAccuracy && (
+                          <span className="ml-2 inline-block rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-700 align-middle">
+                            情绪准确度
+                          </span>
+                        )}
                       </h4>
+                      {isEmotionAccuracy && targetEmotion && (
+                        <p className="mt-2 text-sm font-medium text-blue-700">
+                          目标情绪：{targetEmotion}。请选择更准确表达该情绪的音频。
+                        </p>
+                      )}
                       {dim.description && (
                         <p className="text-sm text-gray-500 mt-1 leading-relaxed">{dim.description}</p>
                       )}

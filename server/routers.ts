@@ -1,4 +1,5 @@
 import { COOKIE_NAME } from "@shared/const";
+import { getEmotionCategories, isDimensionApplicable, type EmotionCategory } from "@shared/evaluationDimensions";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, router, protectedProcedure, adminProcedure } from "./_core/trpc";
@@ -19,6 +20,32 @@ function getInsertId(result: unknown): number {
 
 // 参考音频(音色相似度维度)在 audioFiles 中用此 modelName 作标记:不参与配对、不出现在音频管理列表。
 export const REFERENCE_MODEL_NAME = "__reference__";
+
+const emotionCategoriesSchema = z.array(z.object({
+  name: z.string().trim().min(1).max(255),
+  groupLabels: z.array(z.string().trim().min(1)).min(1),
+})).min(1);
+
+async function validateEmotionCategories(questionnaireId: number, categories: EmotionCategory[]) {
+  if (!categories.length) throw new TRPCError({ code: "BAD_REQUEST", message: "情绪准确度必须设置至少一个情绪类别并指定组别" });
+  const groups = new Set((await db.getAudioFilesByQuestionnaire(questionnaireId))
+    .filter(a => a.modelName !== REFERENCE_MODEL_NAME)
+    .map(a => a.groupLabel?.trim()).filter((v): v is string => Boolean(v)));
+  const names = new Set<string>();
+  const assignedGroups = new Set<string>();
+  for (const category of categories) {
+    if (!category.name.trim() || !category.groupLabels.length || names.has(category.name)) {
+      throw new TRPCError({ code: "BAD_REQUEST", message: "情绪类别名称不能为空或重复，每个类别必须指定组别" });
+    }
+    names.add(category.name);
+    for (const label of category.groupLabels) {
+      if (!groups.has(label) || assignedGroups.has(label)) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "组别必须属于当前问卷，且每个组别只能指定一种目标情绪" });
+      }
+      assignedGroups.add(label);
+    }
+  }
+}
 
 // 默认预置评分维度:所有新问卷创建时自动带入这三个常用维度(音质/自然度/情感表现力)。
 // 释义为产品统一约定,管理员可在问卷详情页按需增删或补充"音色相似度"等特殊维度。
@@ -911,6 +938,7 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
                 dimensionType: d.dimensionType,
                 referenceAudioFileId: refNewId,
                 targetGroupLabels: d.dimensionType === "similarity" ? d.targetGroupLabels : null,
+                emotionCategories: d.dimensionType === "emotion_accuracy" ? d.emotionCategories : null,
               };
             })
           );
@@ -945,9 +973,10 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
         weight: z.number().default(1),
         maxScore: z.number().default(10),
         orderIndex: z.number(),
-        dimensionType: z.enum(["normal", "similarity"]).default("normal"),
+        dimensionType: z.enum(["normal", "similarity", "emotion_accuracy"]).default("normal"),
         referenceAudioFileId: z.number().int().positive().nullable().optional(),
         targetGroupLabels: z.array(z.string().trim().min(1)).optional(),
+        emotionCategories: emotionCategoriesSchema.optional(),
       }))
       .mutation(async ({ input, ctx }) => {
         const questionnaire = await db.getQuestionnaireById(input.questionnaireId);
@@ -967,7 +996,9 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
           referenceAudioFileId = input.referenceAudioFileId;
           targetGroupLabels = JSON.stringify(labels);
         }
-        const result = await db.createEvaluationDimension({ questionnaireId: input.questionnaireId, dimensionName: input.dimensionName, description: input.description || null, weight: String(input.weight) as any, maxScore: String(input.maxScore) as any, orderIndex: input.orderIndex, dimensionType: input.dimensionType, referenceAudioFileId, targetGroupLabels });
+        const emotionCategories = input.dimensionType === "emotion_accuracy" ? input.emotionCategories ?? [] : null;
+        if (emotionCategories) await validateEmotionCategories(input.questionnaireId, emotionCategories);
+        const result = await db.createEvaluationDimension({ questionnaireId: input.questionnaireId, dimensionName: input.dimensionName, description: input.description || null, weight: String(input.weight) as any, maxScore: String(input.maxScore) as any, orderIndex: input.orderIndex, dimensionType: input.dimensionType, referenceAudioFileId, targetGroupLabels, emotionCategories });
         return { success: true, dimensionId: getInsertId(result) };
       }),
 
@@ -1024,7 +1055,7 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
       }),
 
     update: adminProcedure
-      .input(z.object({ id: z.number(), dimensionName: z.string().trim().min(1).optional(), description: z.string().optional(), weight: z.number().optional(), maxScore: z.number().optional(), orderIndex: z.number().optional(), dimensionType: z.enum(["normal", "similarity"]).optional(), referenceAudioFileId: z.number().int().positive().nullable().optional(), targetGroupLabels: z.array(z.string().trim().min(1)).optional() }))
+      .input(z.object({ id: z.number(), dimensionName: z.string().trim().min(1).optional(), description: z.string().optional(), weight: z.number().optional(), maxScore: z.number().optional(), orderIndex: z.number().optional(), dimensionType: z.enum(["normal", "similarity", "emotion_accuracy"]).optional(), referenceAudioFileId: z.number().int().positive().nullable().optional(), targetGroupLabels: z.array(z.string().trim().min(1)).optional(), emotionCategories: emotionCategoriesSchema.optional() }))
       .mutation(async ({ input, ctx }) => {
         const dimension = await db.getEvaluationDimensionById(input.id);
         const questionnaire = dimension && await db.getQuestionnaireById(dimension.questionnaireId);
@@ -1041,7 +1072,10 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
           if (!audio || audio.questionnaireId !== dimension.questionnaireId || audio.uploaderId !== ctx.user.id || labels.some(v => !groups.has(v))) throw new TRPCError({ code: "BAD_REQUEST", message: "参考音频或目标组别不属于当前问卷" });
         }
         const { id, targetGroupLabels: _labels, referenceAudioFileId: _reference, ...fields } = input;
-        const updates: any = { ...fields, dimensionType: type, referenceAudioFileId: type === "similarity" ? referenceId : null, targetGroupLabels: type === "similarity" ? JSON.stringify(labels) : null };
+        const emotionCategories = type === "emotion_accuracy"
+          ? input.emotionCategories ?? getEmotionCategories(dimension.emotionCategories) : null;
+        if (emotionCategories) await validateEmotionCategories(dimension.questionnaireId, emotionCategories);
+        const updates: any = { ...fields, dimensionType: type, referenceAudioFileId: type === "similarity" ? referenceId : null, targetGroupLabels: type === "similarity" ? JSON.stringify(labels) : null, emotionCategories };
         if (input.weight !== undefined) updates.weight = String(input.weight);
         if (input.maxScore !== undefined) updates.maxScore = String(input.maxScore);
         await db.updateEvaluationDimension(id, updates);
@@ -1263,7 +1297,7 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
           // 抽样发放:若本问卷锚定了抽样子集(sampledGroupLabels),校验范围缩到抽中组内的 pairs。
           // 未抽样(null)则保持全量校验,不影响存量问卷。
           const sampled = parseSampledGroupLabels(response.sampledGroupLabels);
-          // 为每条盲测 pair 解析其组别(groupLabel),供抽样过滤与"音色相似度维度按组限定"共用。
+          // 为每条盲测 pair 解析其组别(groupLabel),供抽样过滤与特殊维度按组限定共用。
           const pairsWithLabel = await Promise.all(
             pairs.map(async (p) => {
               const leftAudio = await db.getAudioFileById(p.leftAudioFileId);
@@ -1284,24 +1318,17 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
             );
             // 逐条盲测按"适用维度"校验,与前端 filterDimensionsForPair 口径一致:
             // - 普通维度:所有题目都必答;
-            // - 音色相似度维度:仅在其 targetGroups 命中该题组别的题目上必答,否则跳过。
+            // - 特殊维度:仅在目标组别或情绪类别配置命中的题目上必答,否则跳过。
             const missing = scopedPairs.some(({ pair, label }) =>
               dims.some((d) => {
-                if (d.dimensionType === "similarity") {
-                  let targetGroups: string[] = [];
-                  try {
-                    const parsed = JSON.parse(d.targetGroupLabels || "[]");
-                    if (Array.isArray(parsed)) targetGroups = parsed.filter((v) => typeof v === "string");
-                  } catch { /* ignore */ }
-                  if (!label || !targetGroups.includes(label)) return false; // 该题不适用相似度维度,跳过
-                }
+                if (!isDimensionApplicable(d, label)) return false;
                 return !submitted.has(`${pair.id}:${d.id}`);
               }),
             );
             if (missing) {
               throw new TRPCError({
                 code: "BAD_REQUEST",
-                message: `答卷不完整:需完成全部 ${scopedPairs.length} 组 × ${dims.length} 个维度的评分后才能提交`,
+                message: `答卷不完整:需完成全部 ${scopedPairs.length} 组的所有适用维度评分后才能提交`,
               });
             }
           }

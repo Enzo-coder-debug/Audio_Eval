@@ -13,6 +13,7 @@ import { ArrowLeft, Plus, Edit2, Trash2, Music, Send, Copy, Globe, BarChart3, Do
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
 import * as XLSX from "xlsx";
+import { getEmotionCategories, type EmotionCategory } from "@shared/evaluationDimensions";
 
 // 读取音频文件为上传所需格式(与 AdminDashboard 一致)。
 async function readAudioForUpload(file: File) {
@@ -47,13 +48,14 @@ export default function AdminQuestionnaireDetail() {
   const [dimensionWeight, setDimensionWeight] = useState("1");
   const [dimensionMaxScore, setDimensionMaxScore] = useState("10");
   // 特殊维度：音色相似度
-  const [dimensionType, setDimensionType] = useState<"normal" | "similarity">("normal");
+  const [dimensionType, setDimensionType] = useState<"normal" | "similarity" | "emotion_accuracy">("normal");
   const [referenceAudioFileId, setReferenceAudioFileId] = useState<number | null>(null);
   // 参考音频当前显示的文件名(独立上传流程,仅用于回显,不用于业务逻辑)
   const [referenceAudioFileName, setReferenceAudioFileName] = useState<string>("");
   const [referenceAudioUploading, setReferenceAudioUploading] = useState(false);
   const referenceAudioInputRef = React.useRef<HTMLInputElement>(null);
   const [targetGroupLabels, setTargetGroupLabels] = useState<string[]>([]);
+  const [emotionCategories, setEmotionCategories] = useState<EmotionCategory[]>([]);
   // 编辑评分标准(保存后自动重新解析并同步维度)
   const [isStandardDialogOpen, setIsStandardDialogOpen] = useState(false);
   const [standardDraft, setStandardDraft] = useState("");
@@ -265,6 +267,7 @@ export default function AdminQuestionnaireDetail() {
     setReferenceAudioFileName("");
     setReferenceAudioUploading(false);
     setTargetGroupLabels([]);
+    setEmotionCategories([]);
     setEditingDimensionId(null);
   };
 
@@ -286,6 +289,23 @@ export default function AdminQuestionnaireDetail() {
       }
     }
 
+    const categories = emotionCategories.map(category => ({ ...category, name: category.name.trim() }));
+    if (dimensionType === "emotion_accuracy") {
+      if (!categories.length || categories.some(category => !category.name || !category.groupLabels.length)) {
+        toast.error("请为每个情绪类别填写名称并选择至少一个音频组别");
+        return;
+      }
+      if (new Set(categories.map(category => category.name)).size !== categories.length) {
+        toast.error("情绪类别名称不能重复");
+        return;
+      }
+      const labels = categories.flatMap(category => category.groupLabels);
+      if (new Set(labels).size !== labels.length) {
+        toast.error("每个音频组别只能指定一种目标情绪");
+        return;
+      }
+    }
+
     const payload: any = {
       dimensionName,
       description: dimensionDescription || undefined,
@@ -294,6 +314,7 @@ export default function AdminQuestionnaireDetail() {
       dimensionType,
       referenceAudioFileId: dimensionType === "similarity" ? referenceAudioFileId : null,
       targetGroupLabels: dimensionType === "similarity" ? targetGroupLabels : [],
+      emotionCategories: dimensionType === "emotion_accuracy" ? categories : undefined,
     };
 
     if (editingDimensionId) {
@@ -313,7 +334,7 @@ export default function AdminQuestionnaireDetail() {
     setDimensionDescription(dimension.description || "");
     setDimensionWeight(String(dimension.weight));
     setDimensionMaxScore(String(dimension.maxScore));
-    setDimensionType((dimension.dimensionType as "normal" | "similarity") || "normal");
+    setDimensionType((dimension.dimensionType as "normal" | "similarity" | "emotion_accuracy") || "normal");
     setReferenceAudioFileId(dimension.referenceAudioFileId ?? null);
     // 参考音频文件名回显:优先从 dimension 关联对象取,否则查 questionnaireAudios(含参考音频)。
     // 由于 questionnaireAudios 默认过滤参考音频,这里通过 fileName 兜底为空;编辑时如已选参考音频将显示 ID 占位。
@@ -331,6 +352,7 @@ export default function AdminQuestionnaireDetail() {
       } catch { /* ignore */ }
     }
     setTargetGroupLabels(groups);
+    setEmotionCategories(getEmotionCategories(dimension.emotionCategories).map(category => ({ ...category, groupLabels: [...category.groupLabels] })));
     setIsDimensionDialogOpen(true);
   };
 
@@ -881,14 +903,19 @@ export default function AdminQuestionnaireDetail() {
                       </div>
                     </div>
 
-                    {/* 维度类型：普通 / 音色相似度。相似度维度需绑定参考音频并指定目标组别 */}
+                    {/* 维度类型：普通 / 音色相似度 / 情绪准确度，特殊维度按组别配置 */}
                     <div className="space-y-2">
                       <Label>维度类型</Label>
                       <Select
                         value={dimensionType}
                         onValueChange={(v) => {
-                          const next = v as "normal" | "similarity";
+                          const next = v as "normal" | "similarity" | "emotion_accuracy";
                           setDimensionType(next);
+                          if (next === "emotion_accuracy") {
+                            if (!dimensionName.trim()) setDimensionName("情绪准确度");
+                            if (!dimensionDescription.trim()) setDimensionDescription("判断哪段音频更准确地表达指定的目标情绪。");
+                            if (!emotionCategories.length) setEmotionCategories([{ name: "", groupLabels: [] }]);
+                          }
                           if (next === "normal") {
                             setReferenceAudioFileId(null);
                             setReferenceAudioFileName("");
@@ -902,9 +929,53 @@ export default function AdminQuestionnaireDetail() {
                         <SelectContent>
                           <SelectItem value="normal">普通评分维度</SelectItem>
                           <SelectItem value="similarity">音色相似度（需参考音频+目标组别）</SelectItem>
+                          <SelectItem value="emotion_accuracy">情绪准确度（情绪类别+音频组别）</SelectItem>
                         </SelectContent>
                       </Select>
                     </div>
+
+                    {dimensionType === "emotion_accuracy" && (
+                      <div className="space-y-3">
+                        <Label>情绪类别与音频组别 *</Label>
+                        <p className="text-xs text-slate-500">可自定义开心、悲伤、愤怒等类别，每个组别只能对应一种目标情绪。仅在指定组别的题目上展示。</p>
+                        {emotionCategories.map((category, index) => {
+                          const availableGroups = Array.from(new Set(questionnaireAudios
+                            .map((audio: any) => (audio.groupLabel || "").trim())
+                            .filter((label: string) => Boolean(label)))) as string[];
+                          return (
+                            <div key={index} className="rounded-md border p-3 space-y-3">
+                              <div className="flex gap-2">
+                                <Input aria-label={`情绪类别 ${index + 1}`} placeholder="输入情绪类别，如开心" value={category.name}
+                                  onChange={event => setEmotionCategories(prev => prev.map((item, i) => i === index ? { ...item, name: event.target.value } : item))} />
+                                <Button type="button" variant="outline" onClick={() => setEmotionCategories(prev => prev.filter((_, i) => i !== index))}>移除</Button>
+                              </div>
+                              {availableGroups.length === 0 && <p className="text-sm text-slate-500">请先到「音频管理」为音频指定组别</p>}
+                              <div className="flex flex-wrap gap-2">
+                                {availableGroups.map(label => {
+                                  const selected = category.groupLabels.includes(label);
+                                  const assignedElsewhere = emotionCategories.some((item, i) => i !== index && item.groupLabels.includes(label));
+                                  return (
+                                    <Button key={label} type="button" size="sm" variant={selected ? "default" : "outline"}
+                                      disabled={assignedElsewhere} aria-pressed={selected}
+                                      onClick={() => setEmotionCategories(prev => prev.map((item, i) => i === index
+                                        ? { ...item, groupLabels: selected ? item.groupLabels.filter(value => value !== label) : [...item.groupLabels, label] }
+                                        : item))}>{label}</Button>
+                                  );
+                                })}
+                              </div>
+                              {category.groupLabels.filter(label => !availableGroups.includes(label)).map(label => (
+                                <Button key={label} type="button" variant="destructive" size="sm"
+                                  onClick={() => setEmotionCategories(prev => prev.map((item, i) => i === index
+                                    ? { ...item, groupLabels: item.groupLabels.filter(value => value !== label) } : item))}>
+                                  {label}（组别已不存在，点击移除）
+                                </Button>
+                              ))}
+                            </div>
+                          );
+                        })}
+                        <Button type="button" variant="outline" onClick={() => setEmotionCategories(prev => [...prev, { name: "", groupLabels: [] }])}>添加情绪类别</Button>
+                      </div>
+                    )}
 
                     {dimensionType === "similarity" && (
                       <>
@@ -1038,6 +1109,9 @@ export default function AdminQuestionnaireDetail() {
                         <div>
                           <CardTitle className="text-lg">
                             {dimension.dimensionName}
+                            {dimension.dimensionType === "emotion_accuracy" && (
+                              <span className="ml-2 inline-block rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-700">情绪准确度</span>
+                            )}
                             {dimension.dimensionType === "similarity" && (
                               <span className="ml-2 inline-block rounded-full bg-purple-100 px-2 py-0.5 text-xs font-medium text-purple-700 align-middle">
                                 音色相似度
@@ -1079,6 +1153,13 @@ export default function AdminQuestionnaireDetail() {
                           <span className="text-slate-600">满分：</span>
                           <span className="font-medium">{dimension.maxScore}</span>
                         </div>
+                        {dimension.dimensionType === "emotion_accuracy" && (
+                          <div className="space-y-1">
+                            {getEmotionCategories(dimension.emotionCategories).map(category => (
+                              <div key={category.name}><span className="font-medium">{category.name}：</span>{category.groupLabels.join("、")}</div>
+                            ))}
+                          </div>
+                        )}
                         {dimension.dimensionType === "similarity" && (
                           <>
                             <div>

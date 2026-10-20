@@ -1,0 +1,1 @@
+ALTER TABLE `evaluationDimensions` ADD `emotionCategories` json;

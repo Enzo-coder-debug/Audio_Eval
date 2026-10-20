@@ -201,12 +201,14 @@ export const evaluationDimensions = mysqlTable("evaluationDimensions", {
   weight: decimal("weight", { precision: 5, scale: 2 }).default("1"), // scoring weight
   maxScore: decimal("maxScore", { precision: 5, scale: 2 }).default("10"), // max score for this dimension
   orderIndex: int("orderIndex").notNull(), // display order
-  // 维度类型:normal=普通评分维度;similarity=音色相似度(需参考音频+指定组别)。
+  // normal=普通评分;similarity=音色相似度;emotion_accuracy=情绪准确度。
   dimensionType: varchar("dimensionType", { length: 32 }).default("normal").notNull(),
   // 音色相似度参考音频(引用 audioFiles.id);仅 dimensionType=similarity 时使用。
   referenceAudioFileId: int("referenceAudioFileId"),
-  // 音色相似度作用的目标组别(逗号分隔的 groupLabel 列表);仅 dimensionType=similarity 时使用。
+  // 音色相似度作用的目标组别(JSON 字符串形式的 groupLabel 列表);仅 dimensionType=similarity 时使用。
   targetGroupLabels: text("targetGroupLabels"),
+  // 情绪类别与对应音频组别，仅 emotion_accuracy 使用。
+  emotionCategories: json("emotionCategories").$type<{ name: string; groupLabels: string[] }[]>(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });
