@@ -55,6 +55,17 @@ cd "$APP_DIR" || { echo "[start.sh] FATAL: $APP_DIR not found" >> "$LOG_DIR/app.
 if pgrep -f "node dist/index.js" > /dev/null; then
   echo "audio-eval is running"
 else
+  case "${DB_MIGRATE_ON_START-}" in
+    "") echo "[start.sh] shell DB_MIGRATE_ON_START=unset/empty; final value comes from runtime snapshot" ;;
+    0|1) echo "[start.sh] shell DB_MIGRATE_ON_START=$DB_MIGRATE_ON_START; final value comes from runtime snapshot" ;;
+    *) echo "[start.sh] shell DB_MIGRATE_ON_START=invalid (hidden); final value comes from runtime snapshot" ;;
+  esac
+  if [ ! -r "$APP_DIR/.env" ] || ! grep -q '^DB_MIGRATE_ON_START=[01]$' "$APP_DIR/.env"; then
+    echo "[start.sh] FATAL: runtime snapshot missing, unreadable, or missing migration switch; recreate container with matching start_container.sh" | tee -a "$LOG_DIR/app.log"
+    exit 1
+  fi
+  export DOTENV_CONFIG_PATH="$APP_DIR/.env"
+  export DOTENV_CONFIG_OVERRIDE=true
   if ! (set -o pipefail; "$NODE_BIN" --import dotenv/config scripts/prepare-database.mjs 2>&1 | tee -a "$LOG_DIR/app.log"); then
     echo "[start.sh] FATAL: database preparation failed; see deployment console or $LOG_DIR/app.log" | tee -a "$LOG_DIR/app.log"
     exit 1

@@ -42,6 +42,24 @@ chown -R admin:admin /opt/ /export/log/audio-eval/
 # 应用入口 server/_core/index.ts 顶部有 `import "dotenv/config"`，会自动读取
 # 工作目录(/opt/app)下的 .env。因此在切 admin 前，把注入变量 dump 成 .env，
 # dotenv 即可稳定加载，彻底规避 su 丢环境的问题。
+case "${DB_MIGRATE_ON_START-}" in
+  "")
+    echo "[start_container.sh] injected DB_MIGRATE_ON_START=unset/empty; using 0"
+    ;;
+  0|1)
+    echo "[start_container.sh] injected DB_MIGRATE_ON_START=$DB_MIGRATE_ON_START"
+    ;;
+  *)
+    echo "[start_container.sh] FATAL: injected DB_MIGRATE_ON_START must be 0 or 1; value hidden"
+    exit 1
+    ;;
+esac
+export DB_MIGRATE_ON_START="${DB_MIGRATE_ON_START:-0}"
+if [ "$DB_MIGRATE_ON_START" = "1" ] && [ -z "${DATABASE_URL-}" ]; then
+  echo "[start_container.sh] FATAL: enabling migrations requires DATABASE_URL in the same container environment; connection hidden"
+  exit 1
+fi
+
 ENV_FILE=/opt/app/.env
 : > "$ENV_FILE"
 for KEY in DATABASE_URL DB_MIGRATE_ON_START JWT_SECRET \
