@@ -2,6 +2,8 @@ import React, { useState } from "react";
 import { useParams, useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { GroupLabelPicker } from "@/components/GroupLabelPicker";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -123,6 +125,12 @@ export default function AdminQuestionnaireDetail() {
   const { data: audioData, refetch: refetchAudios } =
     trpc.audio.listByQuestionnaire.useQuery({ questionnaireId });
   const questionnaireAudios = audioData?.audios || [];
+  const availableDimensionGroups = React.useMemo(() => Array.from(new Set(
+    (audioData?.audios ?? [])
+      .filter(audio => audio.modelName !== "__reference__")
+      .map(audio => audio.groupLabel?.trim() || "")
+      .filter(Boolean)
+  )).sort((left, right) => left.localeCompare(right, "zh-CN", { numeric: true })), [audioData?.audios]);
   const audioResponseCount = audioData?.responseCount || 0;
   const emptyGroupAudios = questionnaireAudios.filter(audio => !audio.groupLabel?.trim());
   const selectedAudioIdSet = new Set(selectedAudioIds);
@@ -1024,14 +1032,16 @@ export default function AdminQuestionnaireDetail() {
                     添加维度
                   </Button>
                 </DialogTrigger>
-                <DialogContent className="max-w-md">
-                  <DialogHeader>
+                <DialogContent className="flex h-[min(820px,90dvh)] max-h-[calc(100dvh-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl">
+                  <DialogHeader className="shrink-0 border-b px-6 py-4 pr-12">
                     <DialogTitle>
                       {editingDimensionId ? "编辑维度" : "添加新维度"}
                     </DialogTitle>
+                    <DialogDescription>特殊维度支持筛选组别和批量选择，保存后生效。</DialogDescription>
                   </DialogHeader>
 
-                  <div className="space-y-4">
+                  <ScrollArea type="always" className="min-h-0 flex-1">
+                  <div className="min-w-0 space-y-4 p-6">
                     <div className="space-y-2">
                       <Label>维度名称 *</Label>
                       <Input
@@ -1110,9 +1120,9 @@ export default function AdminQuestionnaireDetail() {
                         <Label>情绪类别与音频组别 *</Label>
                         <p className="text-xs text-slate-500">可自定义开心、悲伤、愤怒等类别，每个组别只能对应一种目标情绪。仅在指定组别的题目上展示。</p>
                         {emotionCategories.map((category, index) => {
-                          const availableGroups = Array.from(new Set(questionnaireAudios
-                            .map((audio: any) => (audio.groupLabel || "").trim())
-                            .filter((label: string) => Boolean(label)))) as string[];
+                          const assignedElsewhere = new Map(emotionCategories.flatMap((item, otherIndex) =>
+                            otherIndex === index ? [] : item.groupLabels.map(label => [label, item.name.trim() || `情绪类别 ${otherIndex + 1}`] as const)
+                          ));
                           return (
                             <div key={index} className="rounded-md border p-3 space-y-3">
                               <div className="flex gap-2">
@@ -1120,27 +1130,16 @@ export default function AdminQuestionnaireDetail() {
                                   onChange={event => setEmotionCategories(prev => prev.map((item, i) => i === index ? { ...item, name: event.target.value } : item))} />
                                 <Button type="button" variant="outline" onClick={() => setEmotionCategories(prev => prev.filter((_, i) => i !== index))}>移除</Button>
                               </div>
-                              {availableGroups.length === 0 && <p className="text-sm text-slate-500">请先到「音频管理」为音频指定组别</p>}
-                              <div className="flex flex-wrap gap-2">
-                                {availableGroups.map(label => {
-                                  const selected = category.groupLabels.includes(label);
-                                  const assignedElsewhere = emotionCategories.some((item, i) => i !== index && item.groupLabels.includes(label));
-                                  return (
-                                    <Button key={label} type="button" size="sm" variant={selected ? "default" : "outline"}
-                                      disabled={assignedElsewhere} aria-pressed={selected}
-                                      onClick={() => setEmotionCategories(prev => prev.map((item, i) => i === index
-                                        ? { ...item, groupLabels: selected ? item.groupLabels.filter(value => value !== label) : [...item.groupLabels, label] }
-                                        : item))}>{label}</Button>
-                                  );
-                                })}
-                              </div>
-                              {category.groupLabels.filter(label => !availableGroups.includes(label)).map(label => (
-                                <Button key={label} type="button" variant="destructive" size="sm"
-                                  onClick={() => setEmotionCategories(prev => prev.map((item, i) => i === index
-                                    ? { ...item, groupLabels: item.groupLabels.filter(value => value !== label) } : item))}>
-                                  {label}（组别已不存在，点击移除）
-                                </Button>
-                              ))}
+                              <GroupLabelPicker
+                                label={`情绪类别 ${index + 1} 组别`}
+                                availableLabels={availableDimensionGroups}
+                                selectedLabels={category.groupLabels}
+                                assignedElsewhere={assignedElsewhere}
+                                disabled={isCreatingDimension || isUpdatingDimension}
+                                onChange={groupLabels => setEmotionCategories(prev => prev.map((item, itemIndex) =>
+                                  itemIndex === index ? { ...item, groupLabels } : item
+                                ))}
+                              />
                             </div>
                           );
                         })}
@@ -1187,50 +1186,20 @@ export default function AdminQuestionnaireDetail() {
 
                         <div className="space-y-2">
                           <Label>目标组别 *（只在包含以下组别的盲测题上展示）</Label>
-                          {(() => {
-                            const groupsAvailable = Array.from(new Set(
-                              questionnaireAudios
-                                .map((a: any) => (a.groupLabel || "").trim())
-                                .filter((v: string) => Boolean(v))
-                            )) as string[];
-                            if (groupsAvailable.length === 0) {
-                              return (
-                                <div className="rounded-md border border-dashed p-3 text-sm text-slate-500">
-                      问卷音频尚未设置组别，请先到「音频管理」为音频指定组别
-                                </div>
-                              );
-                            }
-                            return (
-                              <div className="flex flex-wrap gap-2">
-                                {groupsAvailable.map((g) => {
-                                  const active = targetGroupLabels.includes(g);
-                                  return (
-                                    <button
-                                      key={g}
-                                     type="button"
-                                      onClick={() =>
-                                        setTargetGroupLabels((prev) =>
-                                          prev.includes(g) ? prev.filter((x) => x !== g) : [...prev, g]
-                                        )
-                                      }
-                                      className={`px-3 py-1 rounded-full border text-sm ${
-                                        active
-                                          ? "bg-blue-600 text-white border-blue-600"
-                                          : "bg-white text-slate-700 border-slate-300 hover:border-blue-400"
-                                      }`}
-                                    >
-                                      {g}
-                                    </button>
-                                  );
-                                })}
-                              </div>
-                            );
-                          })()}
+                          <GroupLabelPicker
+                            label="音色相似度目标组别"
+                            availableLabels={availableDimensionGroups}
+                            selectedLabels={targetGroupLabels}
+                            onChange={setTargetGroupLabels}
+                            disabled={isCreatingDimension || isUpdatingDimension}
+                          />
                         </div>
                       </>
                     )}
 
-                    <div className="flex gap-2 pt-4">
+                  </div>
+                  </ScrollArea>
+                    <div className="flex shrink-0 gap-2 border-t bg-white px-6 py-4">
                       <Button
                         variant="outline"
                         className="flex-1"
@@ -1249,7 +1218,6 @@ export default function AdminQuestionnaireDetail() {
                         {editingDimensionId ? "更新" : "添加"}
                       </Button>
                     </div>
-                  </div>
                 </DialogContent>
               </Dialog>
               </div>
@@ -1299,6 +1267,7 @@ export default function AdminQuestionnaireDetail() {
                           <Button
                             size="sm"
                             variant="ghost"
+                            aria-label={`编辑维度 ${dimension.dimensionName}`}
                             onClick={() => handleEditDimension(dimension)}
                           >
                             <Edit2 className="w-4 h-4" />
