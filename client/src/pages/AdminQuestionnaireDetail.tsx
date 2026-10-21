@@ -61,6 +61,8 @@ export default function AdminQuestionnaireDetail() {
   // 编辑评分标准(保存后自动重新解析并同步维度)
   const [isStandardDialogOpen, setIsStandardDialogOpen] = useState(false);
   const [standardDraft, setStandardDraft] = useState("");
+  const [isBackgroundDialogOpen, setIsBackgroundDialogOpen] = useState(false);
+  const [backgroundDraft, setBackgroundDraft] = useState("");
   const [isSampleDialogOpen, setIsSampleDialogOpen] = useState(false);
   const [sampleSizeDraft, setSampleSizeDraft] = useState("");
   const [expandedResponseId, setExpandedResponseId] = useState<number | null>(null);
@@ -81,6 +83,8 @@ export default function AdminQuestionnaireDetail() {
     setGroupLabelDraft({});
     setIsBulkGroupDialogOpen(false);
     setBulkGroupLabel("");
+    setIsBackgroundDialogOpen(false);
+    setBackgroundDraft("");
   }, [questionnaireId]);
 
   // Fetch questionnaire details
@@ -263,6 +267,26 @@ export default function AdminQuestionnaireDetail() {
     }
     // 后端已停止在 update 时依据评分标准重建维度，这里只是纯文本存档
     updateStandard({ id: questionnaireId, scoringStandard: standardDraft });
+  };
+
+  const { mutate: updateBackground, isPending: isUpdatingBackground } =
+    trpc.questionnaire.update.useMutation({
+      onSuccess: async () => {
+        await refetchQuestionnaire();
+        setIsBackgroundDialogOpen(false);
+        toast.success("测评背景已更新");
+      },
+      onError: error => toast.error(error.message || "测评背景保存失败，请重试"),
+    });
+
+  const handleSaveBackground = () => {
+    if (isUpdatingBackground) return;
+    const evaluationCopywriting = backgroundDraft.trim();
+    if (!evaluationCopywriting) {
+      toast.error("请填写测评背景");
+      return;
+    }
+    updateBackground({ id: questionnaireId, evaluationCopywriting });
   };
 
   // 保存发放组数(抽样):留空/0 表示发放全部组，>0 表示每位答卷人随机抽取该数量的组别
@@ -810,6 +834,78 @@ export default function AdminQuestionnaireDetail() {
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <Card className="mb-6">
+          <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div className="space-y-1.5">
+              <CardTitle className="text-lg">测评背景</CardTitle>
+              <CardDescription>向答卷人说明本次测评的背景、目的和评估要求。</CardDescription>
+            </div>
+            <Dialog
+              open={isBackgroundDialogOpen}
+              onOpenChange={open => {
+                if (isUpdatingBackground) return;
+                if (open) setBackgroundDraft(questionnaire.evaluationCopywriting || "");
+                setIsBackgroundDialogOpen(open);
+              }}
+            >
+              <DialogTrigger asChild>
+                <Button variant="outline" className="shrink-0">
+                  <Edit2 className="w-4 h-4 mr-2" />
+                  编辑测评背景
+                </Button>
+              </DialogTrigger>
+              <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+                <DialogHeader>
+                  <DialogTitle>编辑测评背景</DialogTitle>
+                  <DialogDescription>
+                    保存后，答卷人下次打开或刷新问卷时将看到新背景。不会修改评分维度、音频、配对或已有答卷。
+                  </DialogDescription>
+                </DialogHeader>
+                <form
+                  className="space-y-4"
+                  onSubmit={event => {
+                    event.preventDefault();
+                    handleSaveBackground();
+                  }}
+                >
+                  <div className="space-y-2">
+                    <Label htmlFor="backgroundDraft">测评背景</Label>
+                    <Textarea
+                      id="backgroundDraft"
+                      placeholder="描述此次盲测的背景、目的和评估要求..."
+                      className="min-h-48"
+                      value={backgroundDraft}
+                      disabled={isUpdatingBackground}
+                      required
+                      onChange={event => setBackgroundDraft(event.target.value)}
+                    />
+                    <p className="text-xs text-slate-500">支持多行文字，测评背景不能为空。</p>
+                  </div>
+                  <div className="flex justify-end gap-2">
+                    <Button type="button" variant="outline" disabled={isUpdatingBackground} onClick={() => setIsBackgroundDialogOpen(false)}>
+                      取消
+                    </Button>
+                    <Button
+                      type="submit"
+                      disabled={isUpdatingBackground || !backgroundDraft.trim() || backgroundDraft.trim() === (questionnaire.evaluationCopywriting || "").trim()}
+                    >
+                      {isUpdatingBackground ? "保存中..." : "保存背景"}
+                    </Button>
+                  </div>
+                </form>
+              </DialogContent>
+            </Dialog>
+          </CardHeader>
+          <CardContent>
+            {questionnaire.evaluationCopywriting?.trim() ? (
+              <p className="max-h-48 overflow-y-auto whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-700">
+                {questionnaire.evaluationCopywriting}
+              </p>
+            ) : (
+              <p className="text-sm text-slate-500">暂未填写测评背景，可点击「编辑测评背景」补充。</p>
+            )}
+          </CardContent>
+        </Card>
         <Tabs defaultValue="dimensions" className="space-y-6">
           <TabsList className="grid w-full max-w-lg grid-cols-4">
             <TabsTrigger value="dimensions">测评维度</TabsTrigger>

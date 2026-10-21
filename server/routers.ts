@@ -816,7 +816,7 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
         id: z.number(),
         title: z.string().optional(),
         description: z.string().optional(),
-        evaluationCopywriting: z.string().optional(),
+        evaluationCopywriting: z.string().trim().min(1, "请填写测评背景").optional(),
         scoringStandard: z.string().optional(),
         status: z.enum(["draft", "published", "offline"]).optional(),
         validFrom: z.date().optional(),
