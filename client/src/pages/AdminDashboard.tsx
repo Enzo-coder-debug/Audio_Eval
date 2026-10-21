@@ -11,6 +11,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Upload, Plus, Music, FileText, LogOut, X, Loader2, Trash2, Copy, Pencil } from "lucide-react";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
+import { deriveGroupLabel } from "@shared/audioGroupLabels";
 
 // 将文件读为 base64 字符串上传:相比 tRPC superjson 序列化 Uint8Array(会展开成
 // 数字数组文本,体积膨胀 3-4 倍),base64 仅膨胀 ~33%,显著减小请求体、加快上传。
@@ -31,12 +32,6 @@ interface AudioItem {
   // 组别:同一 groupLabel 下不同 modelName 的音频会两两配对。
   // 默认取文件名(去扩展名),从而不同模型文件夹里的同名音频(如都叫 001.wav)自动归为同一组。
   groupLabel: string;
-}
-
-// 从文件名推导默认组别:去掉扩展名。这样不同模型目录里的同名文件会落到同一组。
-function deriveGroupLabel(fileName: string): string {
-  const dot = fileName.lastIndexOf(".");
-  return dot > 0 ? fileName.slice(0, dot) : fileName;
 }
 
 // 判断是否音频文件(文件夹上传会带入非音频文件,需过滤)。
@@ -226,7 +221,7 @@ export default function AdminDashboard() {
               mimeType,
               fileSizeBytes: item.file.size,
               modelName: item.modelName.trim(),
-              groupLabel: item.groupLabel.trim() || undefined,
+              groupLabel: item.groupLabel.trim(),
             },
           ],
         });

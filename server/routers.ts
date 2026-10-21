@@ -8,6 +8,22 @@ import { storagePut, buildAudioObjectKey, buildPublicUrl } from "./storage";
 import { invokeLLM } from "./_core/llm";
 import * as db from "./db";
 import { TRPCError } from "@trpc/server";
+import { deriveGroupLabel } from "@shared/audioGroupLabels";
+
+const uploadedAudioSchema = z.object({
+  fileName: z.string().trim().min(1).max(255),
+  fileData: z.string(),
+  mimeType: z.enum(["audio/mpeg", "audio/wav", "audio/mp4"]),
+  fileSizeBytes: z.number(),
+  modelName: z.string().min(1),
+  groupLabel: z.string().trim().max(255).optional(),
+}).transform(audio => ({
+  ...audio,
+  groupLabel: audio.groupLabel ?? deriveGroupLabel(audio.fileName),
+})).refine(audio => Boolean(deriveGroupLabel(audio.fileName)), {
+  message: "文件名无法生成有效组别，请检查文件名",
+  path: ["fileName"],
+});
 
 // mysql2 驱动下 drizzle 的 insert 返回 [ResultSetHeader, ...],insertId 在 result[0];
 // 兼容直接挂在对象上的情况,统一安全取值。
@@ -267,16 +283,7 @@ export const appRouter = router({
     upload: adminProcedure
       .input(z.object({
         title: z.string().min(1, "请填写问卷名称"),
-        audios: z.array(z.object({
-          fileName: z.string(),
-          // fileData 以 base64 字符串传输:避免 tRPC superjson 把 Uint8Array 序列化成
-          // 数字数组文本(每字节膨胀 3-4 倍),base64 仅膨胀 ~33%,大幅减小请求体。
-          fileData: z.string(),
-          mimeType: z.enum(["audio/mpeg", "audio/wav", "audio/mp4"]),
-          fileSizeBytes: z.number(),
-          modelName: z.string().min(1), // New field for model name
-          groupLabel: z.string().optional(), // 组别(可选),同组不同模型两两配对
-        })),
+        audios: z.array(uploadedAudioSchema),
         evaluationCopywriting: z.string(),
         // 创建问卷不再需要填写指标,scoringStandard 保留为可选(仅存档,不再解析维度)。
         scoringStandard: z.string().optional().default(""),
@@ -314,7 +321,6 @@ export const appRouter = router({
             const audioInput = input.audios[i];
             const { fileKey, fileUrl } = uploadResults[i];
 
-            // 创建音频记录并直接归属问卷。groupLabel 可选,默认空(由管理员后续在音频管理里指定)。
             const result = await db.createAudioFile({
               uploaderId: ctx.user.id,
               fileName: audioInput.fileName,
@@ -471,14 +477,7 @@ export const appRouter = router({
     addToQuestionnaire: adminProcedure
       .input(z.object({
         questionnaireId: z.number(),
-        audios: z.array(z.object({
-          fileName: z.string(),
-          fileData: z.string(),
-          mimeType: z.enum(["audio/mpeg", "audio/wav", "audio/mp4"]),
-          fileSizeBytes: z.number(),
-          modelName: z.string().min(1),
-          groupLabel: z.string().optional(),
-        })).min(1),
+        audios: z.array(uploadedAudioSchema).min(1),
       }))
       .mutation(async ({ input, ctx }) => {
         const questionnaire = await db.getQuestionnaireById(input.questionnaireId);
@@ -540,12 +539,22 @@ export const appRouter = router({
      * 批量设置音频组别(groupLabel)。同组内不同模型两两配对。
      * 仅更新组别,不触发配对;管理员配置好后再手动点"生成盲测配对"。
      */
+    fillMissingGroupLabels: adminProcedure
+      .input(z.object({ questionnaireId: z.number().int().positive() }))
+      .mutation(async ({ input, ctx }) => {
+        const questionnaire = await db.getQuestionnaireById(input.questionnaireId);
+        if (!questionnaire || questionnaire.creatorId !== ctx.user.id) {
+          throw new TRPCError({ code: "FORBIDDEN" });
+        }
+        return db.fillMissingAudioGroupLabels(input.questionnaireId);
+      }),
+
     updateGroupLabels: adminProcedure
       .input(z.object({
-        questionnaireId: z.number(),
+        questionnaireId: z.number().int().positive(),
         items: z.array(z.object({
-          audioFileId: z.number(),
-          groupLabel: z.string(),
+          audioFileId: z.number().int().positive(),
+          groupLabel: z.string().trim().max(255, "组别不能超过 255 个字符"),
         })).min(1),
       }))
       .mutation(async ({ input, ctx }) => {
@@ -553,9 +562,18 @@ export const appRouter = router({
         if (!questionnaire || questionnaire.creatorId !== ctx.user.id) {
           throw new TRPCError({ code: "FORBIDDEN" });
         }
-        for (const it of input.items) {
-          await db.updateAudioFile(it.audioFileId, { groupLabel: it.groupLabel.trim() || null });
+        const requestedIds = new Set(input.items.map(item => item.audioFileId));
+        if (requestedIds.size !== input.items.length) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "同一音频不能重复提交组别" });
         }
+        const audios = await db.getAudioFilesByQuestionnaire(input.questionnaireId);
+        const allowedIds = new Set(audios
+          .filter(audio => audio.modelName !== REFERENCE_MODEL_NAME)
+          .map(audio => audio.id));
+        if (input.items.some(item => !allowedIds.has(item.audioFileId))) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "所选音频不属于当前问卷或已被移除，请刷新后重试" });
+        }
+        await db.updateAudioGroupLabels(input.questionnaireId, input.items);
         return { success: true };
       }),
 

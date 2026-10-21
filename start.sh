@@ -55,6 +55,11 @@ cd "$APP_DIR" || { echo "[start.sh] FATAL: $APP_DIR not found" >> "$LOG_DIR/app.
 if pgrep -f "node dist/index.js" > /dev/null; then
   echo "audio-eval is running"
 else
+  if ! "$NODE_BIN" --import dotenv/config scripts/apply-0010-migration.mjs --check >> "$LOG_DIR/app.log" 2>&1; then
+    echo "[start.sh] FATAL: database schema check failed; see $LOG_DIR/app.log" | tee -a "$LOG_DIR/app.log"
+    echo "[start.sh] Confirm the target database, then run in $APP_DIR: node --import dotenv/config scripts/apply-0010-migration.mjs --apply" | tee -a "$LOG_DIR/app.log"
+    exit 1
+  fi
   echo "[start.sh] $(date '+%F %T') launching: $NODE_BIN dist/index.js (v$("$NODE_BIN" -v 2>/dev/null))" >> "$LOG_DIR/app.log"
   echo "[start.sh] env check: DATABASE_URL=$([ -n "$DATABASE_URL" ] && echo set || echo MISSING) JWT_SECRET=$([ -n "$JWT_SECRET" ] && echo set || echo MISSING) ADMIN_USERNAME=$([ -n "$ADMIN_USERNAME" ] && echo set || echo MISSING)" >> "$LOG_DIR/app.log"
   # 后台启动，日志落盘；应用内部固定监听 0.0.0.0:8080

@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { useParams, useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -14,6 +15,7 @@ import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
 import * as XLSX from "xlsx";
 import { getEmotionCategories, type EmotionCategory } from "@shared/evaluationDimensions";
+import { deriveGroupLabel } from "@shared/audioGroupLabels";
 
 // 读取音频文件为上传所需格式(与 AdminDashboard 一致)。
 async function readAudioForUpload(file: File) {
@@ -68,10 +70,18 @@ export default function AdminQuestionnaireDetail() {
   const [pendingAudios, setPendingAudios] = useState<{ file: File; modelName: string; groupLabel: string }[]>([]);
   const audioInputRef = React.useRef<HTMLInputElement>(null);
   const audioFolderInputRef = React.useRef<HTMLInputElement>(null);
-  // 删除:已勾选待移除的音频 id 集合(支持一次移除成组音频后再统一重建配对)
-  const [selectedRemoveIds, setSelectedRemoveIds] = useState<number[]>([]);
+  const [selectedAudioIds, setSelectedAudioIds] = useState<number[]>([]);
+  const [isBulkGroupDialogOpen, setIsBulkGroupDialogOpen] = useState(false);
+  const [bulkGroupLabel, setBulkGroupLabel] = useState("");
   // 组别草稿:音频 id -> 组别输入值(在音频管理表格里就地编辑,保存后调 updateGroupLabels)
   const [groupLabelDraft, setGroupLabelDraft] = useState<Record<number, string>>({});
+
+  React.useEffect(() => {
+    setSelectedAudioIds([]);
+    setGroupLabelDraft({});
+    setIsBulkGroupDialogOpen(false);
+    setBulkGroupLabel("");
+  }, [questionnaireId]);
 
   // Fetch questionnaire details
   const { data: questionnaire, isLoading: isLoadingQuestionnaire, refetch: refetchQuestionnaire } = 
@@ -110,6 +120,12 @@ export default function AdminQuestionnaireDetail() {
     trpc.audio.listByQuestionnaire.useQuery({ questionnaireId });
   const questionnaireAudios = audioData?.audios || [];
   const audioResponseCount = audioData?.responseCount || 0;
+  const emptyGroupAudios = questionnaireAudios.filter(audio => !audio.groupLabel?.trim());
+  const selectedAudioIdSet = new Set(selectedAudioIds);
+  const selectedAudios = questionnaireAudios.filter(audio => selectedAudioIdSet.has(audio.id));
+  const hasUnsavedGroupLabels = questionnaireAudios.some(audio =>
+    (groupLabelDraft[audio.id] ?? audio.groupLabel ?? "").trim() !== (audio.groupLabel ?? "")
+  );
 
   const { mutateAsync: addAudioAsync, isPending: isAddingAudio } =
     trpc.audio.addToQuestionnaire.useMutation({
@@ -120,7 +136,7 @@ export default function AdminQuestionnaireDetail() {
     trpc.audio.removeFromQuestionnaire.useMutation({
       onSuccess: () => {
         toast.success("音频已移除，请重新点击「生成盲测配对」");
-        setSelectedRemoveIds([]);
+        setSelectedAudioIds([]);
         refetchAudios();
         refetchResponses();
       },
@@ -130,12 +146,28 @@ export default function AdminQuestionnaireDetail() {
   // 保存组别:批量把表格中就地编辑的组别写回音频记录(不触发配对)
   const { mutate: saveGroupLabels, isPending: isSavingGroups } =
     trpc.audio.updateGroupLabels.useMutation({
-      onSuccess: () => {
+      onSuccess: async (_result, variables) => {
         toast.success("组别已保存，可点击「生成盲测配对」");
-        refetchAudios();
+        await refetchAudios();
+        setGroupLabelDraft(previous => {
+          const next = { ...previous };
+          for (const item of variables.items) delete next[item.audioFileId];
+          return next;
+        });
       },
       onError: (error) => toast.error(error.message || "保存组别失败"),
     });
+
+  const { mutate: fillFilenameGroups, isPending: isFillingFilenameGroups } =
+    trpc.audio.fillMissingGroupLabels.useMutation({
+      onSuccess: async result => {
+        toast.success(result.updatedCount ? `已按文件名补齐 ${result.updatedCount} 个音频的组别` : "没有需要补齐的空组别");
+        await refetchAudios();
+        setGroupLabelDraft({});
+      },
+      onError: error => toast.error(error.message || "补齐组别失败"),
+    });
+  const isEditingGroups = isSavingGroups || isFillingFilenameGroups;
 
   // 生成盲测配对:按当前音频组别显式重建配对(会清空已有答卷)
   const { mutate: generatePairs, isPending: isGeneratingPairs } =
@@ -385,10 +417,9 @@ export default function AdminQuestionnaireDetail() {
     }
   };
 
-  // 选择文件:把新选中的文件追加到待上传列表(默认模型名/组别留空,由用户填写)
   const handleSelectFiles = (files: FileList | null) => {
     if (!files || files.length === 0) return;
-    const added = Array.from(files).map((file) => ({ file, modelName: "", groupLabel: "" }));
+    const added = Array.from(files).map((file) => ({ file, modelName: "", groupLabel: deriveGroupLabel(file.name) }));
     setPendingAudios((prev) => [...prev, ...added]);
     if (audioInputRef.current) audioInputRef.current.value = "";
   };
@@ -410,7 +441,7 @@ export default function AdminQuestionnaireDetail() {
     }
     const rel = (audioFiles[0] as unknown as { webkitRelativePath?: string }).webkitRelativePath;
     const defaultModel = rel ? rel.split("/")[0] : "";
-    const added = audioFiles.map((file) => ({ file, modelName: defaultModel, groupLabel: "" }));
+    const added = audioFiles.map((file) => ({ file, modelName: defaultModel, groupLabel: deriveGroupLabel(file.name) }));
     setPendingAudios((prev) => [...prev, ...added]);
     toast.success(`已从文件夹添加 ${added.length} 个音频，模型名默认为「${defaultModel || "(请填写)"}」`);
     if (audioFolderInputRef.current) audioFolderInputRef.current.value = "";
@@ -446,7 +477,7 @@ export default function AdminQuestionnaireDetail() {
       const items = pendingAudios.map((it) => ({
         file: it.file,
         modelName: it.modelName.trim(),
-        groupLabel: it.groupLabel.trim() || undefined,
+        groupLabel: it.groupLabel.trim(),
       }));
       const uploadOne = async (it: { file: File; modelName: string; groupLabel?: string }) => {
         const base = await readAudioForUpload(it.file);
@@ -481,20 +512,20 @@ export default function AdminQuestionnaireDetail() {
     }
   };
 
-  const toggleRemoveSelect = (audioFileId: number) => {
-    setSelectedRemoveIds((prev) =>
+  const toggleAudioSelect = (audioFileId: number) => {
+    setSelectedAudioIds((prev) =>
       prev.includes(audioFileId) ? prev.filter((id) => id !== audioFileId) : [...prev, audioFileId]
     );
   };
 
   // 批量移除:勾选成组音频后统一移除(不自动配对,需管理员再手动生成)
   const handleRemoveSelected = () => {
-    if (selectedRemoveIds.length === 0) {
+    if (selectedAudios.length === 0) {
       toast.error("请先勾选要移除的音频");
       return;
     }
-    if (confirm(`确定移除选中的 ${selectedRemoveIds.length} 个音频吗？移除后请重新生成盲测配对。`)) {
-      removeAudio({ questionnaireId, audioFileIds: selectedRemoveIds });
+    if (confirm(`确定移除选中的 ${selectedAudios.length} 个音频吗？移除后请重新生成盲测配对。`)) {
+      removeAudio({ questionnaireId, audioFileIds: selectedAudios.map(audio => audio.id) });
     }
   };
 
@@ -511,8 +542,52 @@ export default function AdminQuestionnaireDetail() {
     saveGroupLabels({ questionnaireId, items });
   };
 
+  const handleOpenBulkGroupEditor = () => {
+    const labels = selectedAudios.map(audio =>
+      (groupLabelDraft[audio.id] ?? audio.groupLabel ?? "").trim()
+    );
+    setBulkGroupLabel(labels.every(label => label === labels[0]) ? labels[0] ?? "" : "");
+    setIsBulkGroupDialogOpen(true);
+  };
+
+  const handleFillFilenameGroups = () => {
+    if (!questionnaire) return;
+    if (hasUnsavedGroupLabels) {
+      toast.error("请先保存表格中的组别修改，再补齐空组别");
+      return;
+    }
+    if (confirm(`将为「${questionnaire.title}」的 ${emptyGroupAudios.length} 个空组别音频，按文件名（去掉扩展名）补齐组别。已有组别保持不变，不重建配对、不清空答卷。确定继续？`)) {
+      fillFilenameGroups({ questionnaireId });
+    }
+  };
+
+  const handleSaveBulkGroupLabels = () => {
+    if (!selectedAudios.length) {
+      toast.error("请先勾选要编辑组别的音频");
+      return;
+    }
+    const groupLabel = bulkGroupLabel.trim();
+    if (groupLabel.length > 255) {
+      toast.error("组别不能超过 255 个字符");
+      return;
+    }
+    saveGroupLabels({
+      questionnaireId,
+      items: selectedAudios.map(audio => ({ audioFileId: audio.id, groupLabel })),
+    }, {
+      onSuccess: () => {
+        setIsBulkGroupDialogOpen(false);
+        setSelectedAudioIds([]);
+      },
+    });
+  };
+
   // 生成盲测配对:显式重建(会清空已有答卷),先保存当前组别再生成
   const handleGeneratePairs = () => {
+    if (hasUnsavedGroupLabels) {
+      toast.error("请先保存组别修改，再生成盲测配对");
+      return;
+    }
     const msg = audioResponseCount > 0
       ? `该问卷已有 ${audioResponseCount} 份答卷，重新生成配对会清空已有答卷数据，确定继续？`
       : "将按当前音频组别生成盲测配对（同组内不同模型两两配对）。确定继续？";
@@ -1204,7 +1279,7 @@ export default function AdminQuestionnaireDetail() {
               <p className="text-slate-600 mt-1">
                 可一次选择多个音频、分别填好模型名和组别后统一上传。上传/移除后不再自动配对，需在下方为音频设置组别并点击「生成盲测配对」（同组内不同模型两两配对）。
                 {audioResponseCount > 0 && (
-                  <span className="text-red-600">（该问卷已有 {audioResponseCount} 份答卷，修改音频会清空已有答卷）</span>
+                  <span className="text-red-600">（该问卷已有 {audioResponseCount} 份答卷，重新生成配对会清空已有答卷）</span>
                 )}
               </p>
             </div>
@@ -1212,7 +1287,7 @@ export default function AdminQuestionnaireDetail() {
             <Card>
               <CardHeader>
                 <CardTitle className="text-lg">批量新增音频</CardTitle>
-                <CardDescription>先选择一批音频文件，为每个文件填写模型名称，最后统一上传并重建配对</CardDescription>
+                <CardDescription>选择音频后填写模型名称，组别默认取文件名（去掉扩展名），可手动修改或清空；上传后按需生成配对。</CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="space-y-2">
@@ -1303,14 +1378,31 @@ export default function AdminQuestionnaireDetail() {
                 <CardContent className="pt-6">
                   <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                     <span className="text-sm text-slate-600">
-                      已勾选 {selectedRemoveIds.length} 个音频
+                      已勾选 {selectedAudios.length} / {questionnaireAudios.length} 个音频
                     </span>
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={handleOpenBulkGroupEditor}
+                        disabled={isEditingGroups || isGeneratingPairs || isRemovingAudio || selectedAudios.length === 0}
+                      >
+                        <Edit2 className="w-4 h-4 mr-1" />
+                        批量编辑组别（{selectedAudios.length}）
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={handleFillFilenameGroups}
+                        disabled={isEditingGroups || isGeneratingPairs || isRemovingAudio || hasUnsavedGroupLabels || emptyGroupAudios.length === 0}
+                      >
+                        {isFillingFilenameGroups ? "补齐中..." : `按文件名补齐空组别（${emptyGroupAudios.length}）`}
+                      </Button>
                       <Button
                         variant="outline"
                         size="sm"
                         onClick={handleSaveGroupLabels}
-                        disabled={isSavingGroups || questionnaireAudios.length === 0}
+                        disabled={isEditingGroups || isGeneratingPairs || isRemovingAudio || questionnaireAudios.length === 0}
                       >
                         {isSavingGroups ? "保存中..." : "保存组别"}
                       </Button>
@@ -1318,7 +1410,7 @@ export default function AdminQuestionnaireDetail() {
                         size="sm"
                         className="bg-blue-600 hover:bg-blue-700"
                         onClick={handleGeneratePairs}
-                        disabled={isGeneratingPairs || questionnaireAudios.length === 0}
+                        disabled={isGeneratingPairs || isEditingGroups || isRemovingAudio || hasUnsavedGroupLabels || questionnaireAudios.length === 0}
                       >
                         {isGeneratingPairs ? "生成中..." : "生成盲测配对"}
                       </Button>
@@ -1327,17 +1419,63 @@ export default function AdminQuestionnaireDetail() {
                         size="sm"
                         className="text-red-600 border-red-200 hover:bg-red-50"
                         onClick={handleRemoveSelected}
-                        disabled={isRemovingAudio || selectedRemoveIds.length === 0}
+                        disabled={isRemovingAudio || isEditingGroups || isGeneratingPairs || selectedAudios.length === 0}
                       >
                         <Trash2 className="w-4 h-4 mr-1" />
-                        {isRemovingAudio ? "移除中..." : `批量移除（${selectedRemoveIds.length}）`}
+                        {isRemovingAudio ? "移除中..." : `批量移除（${selectedAudios.length}）`}
                       </Button>
                     </div>
                   </div>
+                  {hasUnsavedGroupLabels && (
+                    <p className="mb-3 text-sm text-amber-700">有未保存的组别修改，请先点击「保存组别」，再生成盲测配对。</p>
+                  )}
+                  <Dialog
+                    open={isBulkGroupDialogOpen}
+                    onOpenChange={open => { if (!isSavingGroups) setIsBulkGroupDialogOpen(open); }}
+                  >
+                    <DialogContent className="max-w-md">
+                      <DialogHeader>
+                        <DialogTitle>批量编辑组别</DialogTitle>
+                        <DialogDescription>
+                          仅修改选中的 {selectedAudios.length} 个音频，未选音频及其未保存的修改保持不变。
+                        </DialogDescription>
+                      </DialogHeader>
+                      <form className="space-y-4" onSubmit={event => { event.preventDefault(); if (!isSavingGroups) handleSaveBulkGroupLabels(); }}>
+                        <div className="space-y-2">
+                          <Label htmlFor="bulk-group-label">统一设置组别</Label>
+                          <Input
+                            id="bulk-group-label"
+                            placeholder="例如：query1；留空则清空组别"
+                            value={bulkGroupLabel}
+                            maxLength={255}
+                            disabled={isSavingGroups}
+                            onChange={event => setBulkGroupLabel(event.target.value)}
+                          />
+                          <p className="text-xs text-slate-500">最多 255 个字符。留空会清空所选音频的组别。</p>
+                        </div>
+                        <p className="text-sm text-amber-700">
+                          保存不会自动重建配对或清空答卷。修改后请检查情绪准确度、音色相似度的组别配置，再手动生成配对；重建配对会清空已有答卷。
+                        </p>
+                        <div className="flex justify-end gap-2">
+                          <Button type="button" variant="outline" disabled={isSavingGroups} onClick={() => setIsBulkGroupDialogOpen(false)}>取消</Button>
+                          <Button type="submit" disabled={isSavingGroups || selectedAudios.length === 0}>
+                            {isSavingGroups ? "保存中..." : bulkGroupLabel.trim() ? `保存所选 ${selectedAudios.length} 个音频` : `清空所选 ${selectedAudios.length} 个音频的组别`}
+                          </Button>
+                        </div>
+                      </form>
+                    </DialogContent>
+                  </Dialog>
                   <Table>
                     <TableHeader>
                       <TableRow>
-                        <TableHead className="w-10">选择</TableHead>
+                        <TableHead className="w-10">
+                          <Checkbox
+                            aria-label="全选音频"
+                            checked={selectedAudios.length === questionnaireAudios.length ? true : selectedAudios.length > 0 ? "indeterminate" : false}
+                            disabled={isEditingGroups || isGeneratingPairs || isRemovingAudio}
+                            onCheckedChange={checked => setSelectedAudioIds(checked === true ? questionnaireAudios.map(audio => audio.id) : [])}
+                          />
+                        </TableHead>
                         <TableHead>文件名</TableHead>
                         <TableHead>模型名称</TableHead>
                         <TableHead className="w-40">组别</TableHead>
@@ -1349,11 +1487,11 @@ export default function AdminQuestionnaireDetail() {
                       {questionnaireAudios.map((audio: any) => (
                         <TableRow key={audio.id}>
                           <TableCell>
-                            <input
-                              type="checkbox"
-                              className="h-4 w-4"
-                              checked={selectedRemoveIds.includes(audio.id)}
-                              onChange={() => toggleRemoveSelect(audio.id)}
+                            <Checkbox
+                              aria-label={`选择音频 ${audio.fileName}`}
+                              checked={selectedAudioIdSet.has(audio.id)}
+                              disabled={isEditingGroups || isGeneratingPairs || isRemovingAudio}
+                              onCheckedChange={() => toggleAudioSelect(audio.id)}
                             />
                           </TableCell>
                           <TableCell>
@@ -1367,6 +1505,9 @@ export default function AdminQuestionnaireDetail() {
                             <Input
                               className="w-36 h-8"
                               placeholder="组别"
+                              aria-label={`${audio.fileName} 的组别`}
+                              maxLength={255}
+                              disabled={isEditingGroups || isGeneratingPairs || isRemovingAudio}
                               value={groupLabelDraft[audio.id] ?? audio.groupLabel ?? ""}
                               onChange={(e) =>
                                 setGroupLabelDraft((prev) => ({ ...prev, [audio.id]: e.target.value }))

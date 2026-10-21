@@ -128,5 +128,25 @@ pnpm start            # PORT=8080 node dist/index.js
 
 - 平台强约束：仅监听 **8080** 端口。
 - 环境变量在 JDOS 控制台注入，**修改后需重建 Pod 才生效**（`.env` 不入库）。
-- 数据库迁移：`scripts/apply-0006-migration.mjs`；本机连京东云 RDS 需经跳板机 SSH 隧道（见 `scripts/ssh-tunnel.exp`）。
+- 数据库迁移必须在新版本启动前完成，构建镜像不会自动修改数据库；本机连京东云 RDS 需经跳板机 SSH 隧道（见 `scripts/ssh-tunnel.exp`）。
 - OSS 在容器内须用 **内网 endpoint**（公网 endpoint 会 ETIMEDOUT）。
+
+### 情绪准确度上线：0010 迁移
+
+新版本的 `evaluationDimensions` 增加可空 JSON 列 `emotionCategories`。即使创建的是普通指标，ORM 的插入和查询也会引用该列；如果仅发布代码、未迁移数据库，旧问卷添加指标、新问卷写入默认指标及指标查询都会失败。错误弹窗中的 `Failed query` 不包含底层数据库错误码，应先核查目标库是否缺列，不要通过重建问卷或删除历史数据解决。
+
+在**实际运行服务的容器**内，确认 `/opt/app/.env` 对应目标数据库后执行：
+
+```bash
+cd /opt/app
+node --import dotenv/config scripts/apply-0010-migration.mjs --check
+node --import dotenv/config scripts/apply-0010-migration.mjs --apply
+node --import dotenv/config scripts/apply-0010-migration.mjs --check
+```
+
+- 检查默认只读：退出码 `0` 表示字段匹配，`2` 表示缺列，`1` 表示配置、连接、权限或字段类型异常。仅在确认缺列和目标库无误后执行 `--apply`。
+- `--apply` 仅补齐 `emotionCategories JSON NULL`，保留现有行；已存在则跳过，可重复执行。若字段类型不匹配，不自动改列，需人工核查。DDL 仍应按生产变更流程安排执行。
+- 如果运维终端已显式注入 `DATABASE_URL`，也可用 `pnpm db:check:0010` 和 `pnpm db:migrate:0010`；这两个命令不自动加载本地环境文件，避免误连其他数据库。
+- `pnpm start` 与 JDOS 的 `start.sh` 在启动新进程前执行同一只读检查；检查失败即停止启动，并在日志中提示处理方式，不自动执行生产 DDL。直接运行 `node dist/index.js` 会绕过该检查。
+- 此脚本用于已部署数据库的定向补列，不修改 Drizzle 迁移账本；已有手工迁移历史的库不要直接重放全部迁移。新库或迁移账本完整的库应按正常 Drizzle 流程应用 `drizzle/0010_broken_jocasta.sql`，不要混用两种迁移方式。
+- 迁移后验证：旧问卷新增普通/情绪指标、新建问卷的默认指标、情绪类别保存及重新读取。此前失败的新建操作可能已留下草稿或上传文件，先检查现有记录，避免反复创建或自动清理历史数据。

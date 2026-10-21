@@ -21,6 +21,7 @@ import {
   type InsertEvaluationDimension,
 } from "../drizzle/schema";
 import { ENV } from './_core/env';
+import { buildFilenameGroupUpdates } from "../shared/audioGroupLabels";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -150,6 +151,49 @@ export async function updateAudioFile(id: number, updates: Partial<typeof audioF
   return db.update(audioFiles)
     .set(updates)
     .where(eq(audioFiles.id, id));
+}
+
+export async function updateAudioGroupLabels(
+  questionnaireId: number,
+  items: { audioFileId: number; groupLabel: string }[],
+) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  const groupedIds = new Map<string | null, number[]>();
+  for (const item of items) {
+    const label = item.groupLabel.trim() || null;
+    const ids = groupedIds.get(label) ?? [];
+    ids.push(item.audioFileId);
+    groupedIds.set(label, ids);
+  }
+
+  await db.transaction(async transaction => {
+    for (const [groupLabel, ids] of Array.from(groupedIds.entries())) {
+      await transaction.update(audioFiles)
+        .set({ groupLabel })
+        .where(and(
+          eq(audioFiles.questionnaireId, questionnaireId),
+          inArray(audioFiles.id, ids),
+        ));
+    }
+  });
+}
+
+export async function fillMissingAudioGroupLabels(questionnaireId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+
+  return db.transaction(async transaction => {
+    const audios = await transaction.select().from(audioFiles)
+      .where(eq(audioFiles.questionnaireId, questionnaireId)).for("update");
+    const items = buildFilenameGroupUpdates(audios);
+    for (const item of items) {
+      await transaction.update(audioFiles).set({ groupLabel: item.groupLabel })
+        .where(and(eq(audioFiles.questionnaireId, questionnaireId), eq(audioFiles.id, item.audioFileId)));
+    }
+    return { updatedCount: items.length };
+  });
 }
 
 /**
