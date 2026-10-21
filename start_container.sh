@@ -44,7 +44,7 @@ chown -R admin:admin /opt/ /export/log/audio-eval/
 # dotenv 即可稳定加载，彻底规避 su 丢环境的问题。
 ENV_FILE=/opt/app/.env
 : > "$ENV_FILE"
-for KEY in DATABASE_URL JWT_SECRET \
+for KEY in DATABASE_URL DB_MIGRATE_ON_START JWT_SECRET \
            OSS_ENDPOINT OSS_REGION OSS_BUCKET OSS_ACCESS_KEY_ID OSS_SECRET_ACCESS_KEY \
            ADMIN_USERNAME ADMIN_PASSWORD ADMIN_OPEN_ID \
            OAUTH_SERVER_URL VITE_APP_ID OWNER_OPEN_ID OWNER_NAME; do

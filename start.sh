@@ -55,17 +55,8 @@ cd "$APP_DIR" || { echo "[start.sh] FATAL: $APP_DIR not found" >> "$LOG_DIR/app.
 if pgrep -f "node dist/index.js" > /dev/null; then
   echo "audio-eval is running"
 else
-  if ! "$NODE_BIN" --import dotenv/config scripts/apply-0010-migration.mjs --check >> "$LOG_DIR/app.log" 2>&1; then
-    echo "[start.sh] FATAL: database schema check failed; see $LOG_DIR/app.log" | tee -a "$LOG_DIR/app.log"
-    echo "[start.sh] Confirm the target database, then run in $APP_DIR: node --import dotenv/config scripts/apply-0010-migration.mjs --apply" | tee -a "$LOG_DIR/app.log"
-    exit 1
-  fi
-  if ! "$NODE_BIN" --import dotenv/config scripts/apply-0011-migration.mjs --check >> "$LOG_DIR/app.log" 2>&1; then
-    echo "[start.sh] FATAL: sub-questionnaire schema check failed; confirm DATABASE_URL and run: node --import dotenv/config scripts/apply-0011-migration.mjs --apply" | tee -a "$LOG_DIR/app.log"
-    exit 1
-  fi
-  if ! "$NODE_BIN" --import dotenv/config scripts/apply-0012-migration.mjs --check >> "$LOG_DIR/app.log" 2>&1; then
-    echo "[start.sh] FATAL: scoring schema check failed; confirm DATABASE_URL and run: node --import dotenv/config scripts/apply-0012-migration.mjs --apply" | tee -a "$LOG_DIR/app.log"
+  if ! (set -o pipefail; "$NODE_BIN" --import dotenv/config scripts/prepare-database.mjs 2>&1 | tee -a "$LOG_DIR/app.log"); then
+    echo "[start.sh] FATAL: database preparation failed; see deployment console or $LOG_DIR/app.log" | tee -a "$LOG_DIR/app.log"
     exit 1
   fi
   echo "[start.sh] $(date '+%F %T') launching: $NODE_BIN dist/index.js (v$("$NODE_BIN" -v 2>/dev/null))" >> "$LOG_DIR/app.log"
@@ -76,4 +67,6 @@ else
   echo "audio-eval start success"
 fi
 
-[ -f "/home/admin/start_after.sh" ] && bash /home/admin/start_after.sh
+if [ -f "/home/admin/start_after.sh" ]; then
+  bash /home/admin/start_after.sh
+fi

@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "NODE_ENV=development tsx watch server/_core/index.ts",
     "build": "vite build && esbuild server/_core/index.ts --platform=node --packages=external --bundle --format=esm --outdir=dist",
-    "start": "node --import dotenv/config scripts/apply-0010-migration.mjs --check && node --import dotenv/config scripts/apply-0011-migration.mjs --check && node --import dotenv/config scripts/apply-0012-migration.mjs --check && NODE_ENV=production PORT=8080 node dist/index.js",
+    "start": "node --import dotenv/config scripts/prepare-database.mjs && NODE_ENV=production PORT=8080 node dist/index.js",
     "check": "tsc --noEmit",
     "format": "prettier --write .",
     "test": "vitest run",

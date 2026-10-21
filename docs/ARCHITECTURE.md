@@ -123,7 +123,7 @@ pnpm test             # vitest
 
 ```bash
 pnpm build            # vite build + esbuild 打包 server 到 dist/
-pnpm start            # PORT=8080 node dist/index.js
+pnpm start            # 启动前数据库检查通过后，PORT=8080 node dist/index.js
 ```
 
 - 平台强约束：仅监听 **8080** 端口。
@@ -147,6 +147,6 @@ node --import dotenv/config scripts/apply-0010-migration.mjs --check
 - 检查默认只读：退出码 `0` 表示字段匹配，`2` 表示缺列，`1` 表示配置、连接、权限或字段类型异常。仅在确认缺列和目标库无误后执行 `--apply`。
 - `--apply` 仅补齐 `emotionCategories JSON NULL`，保留现有行；已存在则跳过，可重复执行。若字段类型不匹配，不自动改列，需人工核查。DDL 仍应按生产变更流程安排执行。
 - 如果运维终端已显式注入 `DATABASE_URL`，也可用 `pnpm db:check:0010` 和 `pnpm db:migrate:0010`；这两个命令不自动加载本地环境文件，避免误连其他数据库。
-- `pnpm start` 与 JDOS 的 `start.sh` 在启动新进程前执行同一只读检查；检查失败即停止启动，并在日志中提示处理方式，不自动执行生产 DDL。直接运行 `node dist/index.js` 会绕过该检查。
+- `pnpm start` 与 JDOS 的 `start.sh` 使用 `scripts/prepare-database.mjs` 统一检查 0010/0011/0012，默认只读，失败即停止启动。无法进入 WebShell 时，可按 `QUANTITATIVE_SCORING.md` 的流程在部署平台显式设置 `DB_MIGRATE_ON_START=1`：先检查，确认仅缺列后才补齐，再复核。开关默认关闭，成功后应改回 `0`；检查和迁移日志同步输出部署控制台。直接运行 `node dist/index.js` 会绕过该检查，不建议以此规避缺列问题。
 - 此脚本用于已部署数据库的定向补列，不修改 Drizzle 迁移账本；已有手工迁移历史的库不要直接重放全部迁移。新库或迁移账本完整的库应按正常 Drizzle 流程应用 `drizzle/0010_broken_jocasta.sql`，不要混用两种迁移方式。
 - 迁移后验证：旧问卷新增普通/情绪指标、新建问卷的默认指标、情绪类别保存及重新读取。此前失败的新建操作可能已留下草稿或上传文件，先检查现有记录，避免反复创建或自动清理历史数据。
