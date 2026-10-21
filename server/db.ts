@@ -22,6 +22,7 @@ import {
 } from "../drizzle/schema";
 import { ENV } from './_core/env';
 import { buildFilenameGroupUpdates } from "../shared/audioGroupLabels";
+import { TRPCError } from "@trpc/server";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -119,12 +120,20 @@ export async function getUserByOpenId(openId: string) {
 /**
  * Audio file operations
  */
+async function lockMutableQuestionnaire(transaction: Pick<NonNullable<Awaited<ReturnType<typeof getDb>>>, "select">, questionnaireId: number | null | undefined) {
+  if (questionnaireId == null) return;
+  const [questionnaire] = await transaction.select({ plan: questionnaires.subQuestionnairePlan }).from(questionnaires).where(eq(questionnaires.id, questionnaireId)).for("update");
+  if (questionnaire?.plan != null) throw new TRPCError({ code: "CONFLICT", message: "已启用固定子问卷，不能更改题库或绕过限额领取；请刷新页面" });
+}
+
 export async function createAudioFile(file: typeof audioFiles.$inferInsert) {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
   
-  const result = await db.insert(audioFiles).values(file);
-  return result;
+  return db.transaction(async transaction => {
+    if (file.modelName !== "__reference__") await lockMutableQuestionnaire(transaction, file.questionnaireId);
+    return transaction.insert(audioFiles).values(file);
+  });
 }
 
 export async function getAudioFileById(id: number) {
@@ -148,9 +157,12 @@ export async function updateAudioFile(id: number, updates: Partial<typeof audioF
   const db = await getDb();
   if (!db) throw new Error("Database not available");
   
-  return db.update(audioFiles)
-    .set(updates)
-    .where(eq(audioFiles.id, id));
+  return db.transaction(async transaction => {
+    const [audio] = await transaction.select().from(audioFiles).where(eq(audioFiles.id, id));
+    await lockMutableQuestionnaire(transaction, audio?.questionnaireId);
+    if (updates.questionnaireId != null) await lockMutableQuestionnaire(transaction, updates.questionnaireId);
+    return transaction.update(audioFiles).set(updates).where(eq(audioFiles.id, id));
+  });
 }
 
 export async function updateAudioGroupLabels(
@@ -169,6 +181,7 @@ export async function updateAudioGroupLabels(
   }
 
   await db.transaction(async transaction => {
+    await lockMutableQuestionnaire(transaction, questionnaireId);
     for (const [groupLabel, ids] of Array.from(groupedIds.entries())) {
       await transaction.update(audioFiles)
         .set({ groupLabel })
@@ -185,6 +198,7 @@ export async function fillMissingAudioGroupLabels(questionnaireId: number) {
   if (!db) throw new Error("Database not available");
 
   return db.transaction(async transaction => {
+    await lockMutableQuestionnaire(transaction, questionnaireId);
     const audios = await transaction.select().from(audioFiles)
       .where(eq(audioFiles.questionnaireId, questionnaireId)).for("update");
     const items = buildFilenameGroupUpdates(audios);
@@ -244,9 +258,10 @@ export async function updateQuestionnaire(id: number, updates: Partial<typeof qu
   const db = await getDb();
   if (!db) throw new Error("Database not available");
   
-  return db.update(questionnaires)
-    .set(updates)
-    .where(eq(questionnaires.id, id));
+  return db.transaction(async transaction => {
+    if (updates.sampleSize !== undefined) await lockMutableQuestionnaire(transaction, id);
+    return transaction.update(questionnaires).set(updates).where(eq(questionnaires.id, id));
+  });
 }
 
 export async function getQuestionnaireByShareToken(shareToken: string) {
@@ -288,8 +303,10 @@ export async function createResponse(response: typeof responses.$inferInsert) {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
   
-  const result = await db.insert(responses).values(response);
-  return result;
+  return db.transaction(async transaction => {
+    await lockMutableQuestionnaire(transaction, response.questionnaireId);
+    return transaction.insert(responses).values(response);
+  });
 }
 
 export async function getResponseById(id: number) {
@@ -356,15 +373,20 @@ export async function createBlindTestPairs(pairs: (typeof blindTestPairs.$inferI
   const db = await getDb();
   if (!db) throw new Error("Database not available");
   
-  return db.insert(blindTestPairs).values(pairs);
+  return db.transaction(async transaction => {
+    for (const questionnaireId of Array.from(new Set(pairs.map(pair => pair.questionnaireId))).sort((left, right) => left - right)) await lockMutableQuestionnaire(transaction, questionnaireId);
+    return transaction.insert(blindTestPairs).values(pairs);
+  });
 }
 
 export async function createAnonymousResponse(response: typeof responses.$inferInsert) {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
   
-  const result = await db.insert(responses).values(response);
-  return result;
+  return db.transaction(async transaction => {
+    await lockMutableQuestionnaire(transaction, response.questionnaireId);
+    return transaction.insert(responses).values(response);
+  });
 }
 
 export async function updateResponse(id: number, updates: Partial<typeof responses.$inferInsert>) {
@@ -579,14 +601,21 @@ export async function getAudioFilesByQuestionnaire(
 export async function deleteBlindTestPairsByQuestionnaire(questionnaireId: number) {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
-  return db.delete(blindTestPairs).where(eq(blindTestPairs.questionnaireId, questionnaireId));
+  return db.transaction(async transaction => {
+    await lockMutableQuestionnaire(transaction, questionnaireId);
+    return transaction.delete(blindTestPairs).where(eq(blindTestPairs.questionnaireId, questionnaireId));
+  });
 }
 
 // 删除单个音频记录(仅删记录,OSS 对象保留,避免误删共享文件)。
 export async function deleteAudioFile(id: number) {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
-  return db.delete(audioFiles).where(eq(audioFiles.id, id));
+  return db.transaction(async transaction => {
+    const [audio] = await transaction.select().from(audioFiles).where(eq(audioFiles.id, id));
+    await lockMutableQuestionnaire(transaction, audio?.questionnaireId);
+    return transaction.delete(audioFiles).where(eq(audioFiles.id, id));
+  });
 }
 
 // 统计某问卷是否已有作答记录(改音频前用于风险判断)。
@@ -602,13 +631,16 @@ export async function countResponsesByQuestionnaire(questionnaireId: number) {
 export async function deleteResponsesByQuestionnaire(questionnaireId: number) {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
-  const respRows = await db.select({ id: responses.id }).from(responses)
+  return db.transaction(async transaction => {
+  await lockMutableQuestionnaire(transaction, questionnaireId);
+  const respRows = await transaction.select({ id: responses.id }).from(responses)
     .where(eq(responses.questionnaireId, questionnaireId));
   for (const r of respRows) {
-    await db.delete(answers).where(eq(answers.responseId, r.id));
+    await transaction.delete(answers).where(eq(answers.responseId, r.id));
   }
-  await db.delete(responses).where(eq(responses.questionnaireId, questionnaireId));
-  await db.delete(questionnaireStats).where(eq(questionnaireStats.questionnaireId, questionnaireId));
+  await transaction.delete(responses).where(eq(responses.questionnaireId, questionnaireId));
+  await transaction.delete(questionnaireStats).where(eq(questionnaireStats.questionnaireId, questionnaireId));
+  });
 }
 
 // 级联删除问卷及其所有关联数据,避免产生孤儿记录。

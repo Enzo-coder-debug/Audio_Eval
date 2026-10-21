@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { GroupLabelPicker } from "@/components/GroupLabelPicker";
+import { SubQuestionnaireDistribution } from "@/components/SubQuestionnaireDistribution";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -14,6 +15,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ArrowLeft, Plus, Edit2, Trash2, Music, Send, Copy, Globe, BarChart3, Download } from "lucide-react";
 import { trpc } from "@/lib/trpc";
+import { formatResponsePairAudioLabel } from "@/lib/responseAudioLabels";
 import { toast } from "sonner";
 import * as XLSX from "xlsx";
 import { getEmotionCategories, type EmotionCategory } from "@shared/evaluationDimensions";
@@ -642,13 +644,6 @@ export default function AdminQuestionnaireDetail() {
   const pairInfoMap = new Map<number, any>(
     (pairsInfo || []).map((p: any) => [p.id, p])
   );
-  // 从文件名中提取音频序号(去扩展名后取末尾数字),用作"音频X"的展示
-  const audioLabel = (fileName: string | null | undefined) => {
-    if (!fileName) return "音频";
-    const base = fileName.replace(/\.[^/.]+$/, "");
-    const m = base.match(/(\d+)\s*$/);
-    return m ? `音频${m[1]}` : base;
-  };
   const verdictLabel = (pair: any, choice: string | null | undefined) => {
     const left = pair?.leftModelName ?? "左侧模型";
     const right = pair?.rightModelName ?? "右侧模型";
@@ -696,6 +691,7 @@ export default function AdminQuestionnaireDetail() {
       const rows: any[] = [];
       // 每个 sheet 头部信息
       rows.push({ 配对: "访客名称", 维度: response.visitorName || "匿名", 选择结果: "" });
+      if (response.subQuestionnaireIndex != null) rows.push({ 配对: "分配子问卷", 维度: `子问卷 ${response.subQuestionnaireIndex}`, 选择结果: "" });
       rows.push({ 配对: "访客IP", 维度: response.visitorIp || "-", 选择结果: "" });
       rows.push({
         配对: "状态",
@@ -713,9 +709,7 @@ export default function AdminQuestionnaireDetail() {
       const groups = groupAnswersByPair(response.answers || []);
       for (const group of groups) {
         const pair = pairInfoMap.get(group.pairId);
-        const leftAudio = audioLabel(pair?.leftFileName);
-        const rightAudio = audioLabel(pair?.rightFileName);
-        const groupTitle = leftAudio === rightAudio ? leftAudio : `${leftAudio} vs ${rightAudio}`;
+        const groupTitle = formatResponsePairAudioLabel(pair);
         for (const a of group.answers) {
           rows.push({
             配对: groupTitle,
@@ -728,7 +722,7 @@ export default function AdminQuestionnaireDetail() {
       }
 
       const ws = XLSX.utils.json_to_sheet(rows, { header: ["配对", "维度", "选择结果"] });
-      ws["!cols"] = [{ wch: 24 }, { wch: 20 }, { wch: 24 }];
+      ws["!cols"] = [{ wch: 60 }, { wch: 20 }, { wch: 24 }];
       XLSX.utils.book_append_sheet(wb, ws, safeSheetName(response.visitorName, idx));
     });
 
@@ -915,12 +909,14 @@ export default function AdminQuestionnaireDetail() {
           </CardContent>
         </Card>
         <Tabs defaultValue="dimensions" className="space-y-6">
-          <TabsList className="grid w-full max-w-lg grid-cols-4">
+          <TabsList className="flex h-auto w-full max-w-2xl flex-wrap justify-start">
             <TabsTrigger value="dimensions">测评维度</TabsTrigger>
             <TabsTrigger value="audios">音频管理</TabsTrigger>
+            <TabsTrigger value="distribution">分组发放</TabsTrigger>
             <TabsTrigger value="progress">填写进展</TabsTrigger>
             <TabsTrigger value="responses">答卷详情</TabsTrigger>
           </TabsList>
+          <TabsContent value="distribution"><SubQuestionnaireDistribution questionnaireId={questionnaireId} published={questionnaire.status === "published"} onChange={() => refetchQuestionnaire()} /></TabsContent>
 
           {/* Dimensions Tab */}
           <TabsContent value="dimensions" className="space-y-6">
@@ -984,13 +980,14 @@ export default function AdminQuestionnaireDetail() {
              }
                     >
                       发放组数
-                      {questionnaire?.sampleSize ? `（抽 ${questionnaire.sampleSize} 组）` : "（全部）"}
+                      {questionnaire?.subQuestionnairePlan ? "（固定子问卷）" : questionnaire?.sampleSize ? `（抽 ${questionnaire.sampleSize} 组）` : "（全部）"}
                     </Button>
                   </DialogTrigger>
                   <DialogContent className="max-w-md">
                     <DialogHeader>
                       <DialogTitle>设置发放组数</DialogTitle>
                       <DialogDescription>
+                        {questionnaire.subQuestionnairePlan != null && "当前已启用固定子问卷，请在「分组发放」中查看和管理；此处不能改为随机抽样。"}
                         设定每位答卷人随机测评的组别数量。留空或填 0 表示发放全部组；填写正整数则每人随机抽取该数量的组（同一人固定，可断点续答）。超出总组数时自动按全部发放。
                       </DialogDescription>
                     </DialogHeader>
@@ -1013,7 +1010,7 @@ export default function AdminQuestionnaireDetail() {
                         </Button>
                         <Button
                           className="bg-blue-600 hover:bg-blue-700"
-                          disabled={isUpdatingStandard}
+                          disabled={isUpdatingStandard || !!questionnaire.subQuestionnairePlan}
                           onClick={handleSaveSampleSize}
                         >
                           {isUpdatingStandard ? "保存中..." : "保存"}
@@ -1703,7 +1700,7 @@ export default function AdminQuestionnaireDetail() {
                       {responses.map((response: any) => (
                         <React.Fragment key={response.id}>
                         <TableRow>
-                          <TableCell>{response.visitorName || "匿名"}</TableCell>
+                          <TableCell>{response.visitorName || "匿名"}{response.subQuestionnaireIndex != null && <p className="text-xs text-blue-600">子问卷 {response.subQuestionnaireIndex}</p>}</TableCell>
                        <TableCell className="font-mono text-sm">{response.visitorIp}</TableCell>
                           <TableCell>
                             <span className={`px-2 py-1 rounded text-xs font-medium ${
@@ -1748,15 +1745,10 @@ export default function AdminQuestionnaireDetail() {
                                 <div className="space-y-4 py-2">
                                   {groupAnswersByPair(response.answers).map((group) => {
                                     const pair = pairInfoMap.get(group.pairId);
-                                    const leftAudio = audioLabel(pair?.leftFileName);
-                                    const rightAudio = audioLabel(pair?.rightFileName);
-                                    const groupTitle =
-                                  leftAudio === rightAudio
-                                        ? leftAudio
-                                        : `${leftAudio} vs ${rightAudio}`;
+                                    const groupTitle = formatResponsePairAudioLabel(pair);
                                     return (
                                     <div key={group.pairId} className="border border-slate-200 rounded-lg p-3 bg-white">
-                                      <p className="font-medium text-slate-800 mb-2">{groupTitle}</p>
+                                      <p className="font-medium text-slate-800 mb-2 break-all">{groupTitle}</p>
                                       <div className="space-y-1">
                                         {group.answers.map((a: any) => (
                                           <div key={a.id} className="flex items-center justify-between text-sm">

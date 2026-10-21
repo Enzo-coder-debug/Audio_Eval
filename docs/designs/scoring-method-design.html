@@ -1,0 +1,533 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>量化打分页面设计（未接入业务）</title>
+</head>
+<body>
+  <p>页面设计原型：尚未接入实际评分、数据存储或统计；页面中的保存、提交仅用于演示。</p>
+<div id="audio-scoring-design">
+  <style>
+    #audio-scoring-design {
+      --ae-bg: light-dark(#f5f7fb, #111723);
+      --ae-panel: light-dark(#ffffff, #1b2230);
+      --ae-text: light-dark(#172238, #e8eef9);
+      --ae-muted: light-dark(#65738a, #a1afc4);
+      --ae-line: light-dark(#e4e9f2, #354154);
+      --ae-blue: light-dark(#2563eb, #80adff);
+      --ae-blue-ink: light-dark(#ffffff, #102445);
+      --ae-soft: light-dark(#edf4ff, #243754);
+      --ae-green: light-dark(#187153, #80d9b7);
+      --ae-error: light-dark(#be3434, #ffa3a3);
+      --ae-shadow: light-dark(#2034550a, #00000022);
+      color: var(--ae-text);
+      font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      width: 100%;
+    }
+    #audio-scoring-design * { box-sizing: border-box; }
+    #audio-scoring-design [hidden] { display: none !important; }
+    #audio-scoring-design h1, #audio-scoring-design h2, #audio-scoring-design h3, #audio-scoring-design p { margin: 0; }
+    #audio-scoring-design h1 { font-size: 20px; font-weight: 600; letter-spacing: -.4px; }
+    #audio-scoring-design h2 { font-size: 17px; font-weight: 600; }
+    #audio-scoring-design h3 { font-size: 14px; font-weight: 600; }
+    #audio-scoring-design button, #audio-scoring-design input, #audio-scoring-design textarea, #audio-scoring-design select { font: inherit; }
+    #audio-scoring-design button:disabled { cursor: not-allowed; opacity: .46; }
+    #audio-scoring-design button:focus-visible, #audio-scoring-design input:focus-visible, #audio-scoring-design textarea:focus-visible, #audio-scoring-design select:focus-visible, #audio-scoring-design summary:focus-visible { outline: 2px solid var(--ae-blue); outline-offset: 3px; }
+    #audio-scoring-design .ae-shell { background: var(--ae-bg); border: 1px solid var(--ae-line); border-radius: 14px; overflow: clip; }
+    #audio-scoring-design .ae-header { padding: 18px 22px; background: var(--ae-panel); border-bottom: 1px solid var(--ae-line); display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+    #audio-scoring-design .ae-brand { width: 36px; height: 36px; border-radius: 10px; background: var(--ae-blue); color: var(--ae-blue-ink); display: grid; place-items: center; flex: 0 0 auto; }
+    #audio-scoring-design .ae-header-text { min-width: 0; flex: 1; }
+    #audio-scoring-design .ae-eyebrow { color: var(--ae-muted); font-size: 12px; margin-bottom: 3px; }
+    #audio-scoring-design .ae-tag { display: inline-flex; align-items: center; border-radius: 5px; padding: 2px 7px; color: var(--ae-muted); background: var(--ae-bg); font-size: 11px; font-weight: 500; white-space: nowrap; }
+    #audio-scoring-design .ae-tag-blue { background: var(--ae-soft); color: var(--ae-blue); }
+    #audio-scoring-design .ae-button { min-height: 36px; padding: 7px 13px; display: inline-flex; justify-content: center; align-items: center; gap: 7px; color: var(--ae-text); background: var(--ae-panel); border: 1px solid var(--ae-line); border-radius: 7px; white-space: nowrap; }
+    #audio-scoring-design .ae-button:hover:not(:disabled) { border-color: var(--ae-blue); }
+    #audio-scoring-design .ae-button-primary { color: var(--ae-blue-ink); background: var(--ae-blue); border-color: var(--ae-blue); }
+    #audio-scoring-design .ae-text-button { padding: 0; border: 0; background: transparent; color: var(--ae-blue); }
+    #audio-scoring-design .ae-workspace { padding: 22px; display: grid; grid-template-columns: 188px minmax(0, 1fr); gap: 20px; align-items: start; }
+    #audio-scoring-design .ae-sidebar { padding-top: 4px; }
+    #audio-scoring-design .ae-sidebar-label { display: flex; justify-content: space-between; padding: 0 9px 12px; color: var(--ae-muted); font-size: 12px; }
+    #audio-scoring-design .ae-metric-nav { width: 100%; text-align: left; background: transparent; border: 1px solid transparent; border-radius: 8px; padding: 11px 10px; margin-bottom: 5px; color: var(--ae-text); }
+    #audio-scoring-design .ae-metric-nav[aria-pressed="true"] { background: var(--ae-panel); border-color: var(--ae-line); box-shadow: 0 2px 5px var(--ae-shadow); }
+    #audio-scoring-design .ae-metric-nav[aria-pressed="true"] .ae-nav-title { color: var(--ae-blue); }
+    #audio-scoring-design .ae-nav-title { display: flex; align-items: center; justify-content: space-between; font-weight: 600; }
+    #audio-scoring-design .ae-nav-desc { display: block; color: var(--ae-muted); font-size: 12px; margin-top: 4px; }
+    #audio-scoring-design .ae-sidebar-foot { padding: 12px 10px; margin-top: 10px; border-top: 1px solid var(--ae-line); font-size: 12px; color: var(--ae-muted); }
+    #audio-scoring-design .ae-editor { min-width: 0; background: var(--ae-panel); border: 1px solid var(--ae-line); border-radius: 11px; box-shadow: 0 2px 8px var(--ae-shadow); }
+    #audio-scoring-design .ae-editor-heading { display: flex; align-items: center; justify-content: space-between; padding: 17px 20px; border-bottom: 1px solid var(--ae-line); gap: 10px; }
+    #audio-scoring-design .ae-editor-body { padding: 19px 20px; }
+    #audio-scoring-design .ae-field { display: block; min-width: 0; }
+    #audio-scoring-design .ae-field-title { display: block; font-size: 12px; color: var(--ae-muted); margin-bottom: 7px; }
+    #audio-scoring-design .ae-input { display: block; width: 100%; min-width: 0; min-height: 37px; border: 1px solid var(--ae-line); border-radius: 6px; color: var(--ae-text); background: var(--ae-panel); padding: 8px 10px; }
+    #audio-scoring-design textarea.ae-input { resize: vertical; }
+    #audio-scoring-design .ae-input::placeholder { color: var(--ae-muted); opacity: .8; }
+    #audio-scoring-design .ae-form-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, .7fr); gap: 15px; }
+    #audio-scoring-design .ae-section { margin-top: 21px; }
+    #audio-scoring-design .ae-section-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+    #audio-scoring-design .ae-section-title small { color: var(--ae-muted); font-weight: 400; font-size: 12px; }
+    #audio-scoring-design .ae-modes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    #audio-scoring-design .ae-mode { text-align: left; padding: 12px; min-width: 0; border: 1px solid var(--ae-line); border-radius: 8px; background: var(--ae-panel); color: var(--ae-text); }
+    #audio-scoring-design .ae-mode span { display: flex; align-items: center; justify-content: space-between; font-weight: 600; gap: 8px; }
+    #audio-scoring-design .ae-mode small { display: block; color: var(--ae-muted); font-size: 12px; margin-top: 4px; }
+    #audio-scoring-design .ae-mode[aria-pressed="true"] { background: var(--ae-soft); border-color: var(--ae-blue); }
+    #audio-scoring-design .ae-radio-dot { width: 15px; height: 15px; flex: 0 0 auto; border: 1px solid var(--ae-line); border-radius: 50%; background: var(--ae-panel); }
+    #audio-scoring-design .ae-mode[aria-pressed="true"] .ae-radio-dot { border: 4px solid var(--ae-blue); }
+    #audio-scoring-design .ae-range { display: grid; grid-template-columns: 1fr 1fr 1fr auto; align-items: end; gap: 10px; }
+    #audio-scoring-design .ae-help { font-size: 12px; color: var(--ae-muted); margin-top: 8px; }
+    #audio-scoring-design .ae-rubric-head, #audio-scoring-design .ae-rule-row { display: grid; grid-template-columns: 46px minmax(0, 1fr); align-items: center; gap: 12px; }
+    #audio-scoring-design .ae-rubric-head { padding: 8px 10px; background: var(--ae-bg); border-radius: 6px; color: var(--ae-muted); font-size: 12px; }
+    #audio-scoring-design .ae-rule-row { padding: 5px 2px; }
+    #audio-scoring-design .ae-rule-row:first-child { padding-top: 9px; }
+    #audio-scoring-design .ae-score-label { font-weight: 600; text-align: center; font-variant-numeric: tabular-nums; }
+    #audio-scoring-design .ae-rule-input { min-height: 38px; padding: 8px 9px; font-size: 12px; }
+    #audio-scoring-design .ae-inline-error { color: var(--ae-error); font-size: 12px; margin-top: 9px; }
+    #audio-scoring-design .ae-context { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; padding: 10px 12px; background: var(--ae-bg); border-radius: 7px; font-size: 12px; color: var(--ae-muted); margin-top: 15px; }
+    #audio-scoring-design .ae-footer { padding: 14px 20px; border-top: 1px solid var(--ae-line); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
+    #audio-scoring-design .ae-footer-caption { font-size: 12px; color: var(--ae-muted); }
+    #audio-scoring-design .ae-gsb-sample { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; padding-top: 15px; }
+    #audio-scoring-design .ae-gsb-sample span { border: 1px solid var(--ae-line); border-radius: 7px; padding: 13px 7px; text-align: center; }
+    #audio-scoring-design .ae-check { display: flex; gap: 9px; align-items: center; }
+    #audio-scoring-design .ae-check input { accent-color: var(--ae-blue); width: 16px; height: 16px; }
+    #audio-scoring-design .ae-text-settings { display: grid; gap: 18px; padding-top: 21px; }
+    #audio-scoring-design .ae-text-demo { padding: 15px; border-radius: 8px; background: var(--ae-bg); }
+    #audio-scoring-design .ae-text-demo p { margin: 6px 0 13px; font-size: 12px; color: var(--ae-muted); }
+    #audio-scoring-design .ae-answer { padding: 22px; }
+    #audio-scoring-design .ae-question-heading { display: flex; justify-content: space-between; align-items: start; gap: 12px; margin-bottom: 15px; }
+    #audio-scoring-design .ae-question-meta { display: flex; gap: 7px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
+    #audio-scoring-design .ae-count { color: var(--ae-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+    #audio-scoring-design .ae-transcript { background: var(--ae-panel); border: 1px solid var(--ae-line); padding: 13px 16px; border-radius: 9px; display: flex; gap: 16px; align-items: start; margin-bottom: 14px; }
+    #audio-scoring-design .ae-transcript-label { color: var(--ae-muted); white-space: nowrap; font-size: 12px; padding-top: 2px; }
+    #audio-scoring-design .ae-audio-grid, #audio-scoring-design .ae-score-grid, #audio-scoring-design .ae-comment-grid, #audio-scoring-design .ae-lane-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    #audio-scoring-design .ae-player { border: 1px solid var(--ae-line); border-radius: 9px; padding: 13px 15px; background: var(--ae-panel); min-width: 0; }
+    #audio-scoring-design .ae-player-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+    #audio-scoring-design .ae-audio-name { display: inline-flex; gap: 8px; align-items: center; font-weight: 600; }
+    #audio-scoring-design .ae-audio-letter { display: inline-grid; place-items: center; width: 25px; height: 25px; background: var(--ae-soft); color: var(--ae-blue); border-radius: 5px; }
+    #audio-scoring-design .ae-player-track { display: flex; gap: 12px; align-items: center; }
+    #audio-scoring-design .ae-play { width: 33px; min-height: 33px; border-radius: 50%; display: grid; place-items: center; background: var(--ae-soft); color: var(--ae-blue); border: 0; flex: 0 0 auto; }
+    #audio-scoring-design .ae-wave { display: flex; flex: 1; gap: 3px; align-items: center; height: 26px; overflow: hidden; }
+    #audio-scoring-design .ae-wave span { width: 3px; min-width: 2px; border-radius: 3px; background: var(--ae-muted); opacity: .45; }
+    #audio-scoring-design .ae-wave span:nth-child(4n) { height: 20px; }
+    #audio-scoring-design .ae-wave span:nth-child(4n+1) { height: 9px; }
+    #audio-scoring-design .ae-wave span:nth-child(4n+2) { height: 25px; }
+    #audio-scoring-design .ae-wave span:nth-child(4n+3) { height: 15px; }
+    #audio-scoring-design .ae-player-note { color: var(--ae-muted); font-size: 11px; margin-top: 6px; }
+    #audio-scoring-design .ae-answer-metric { margin-top: 14px; background: var(--ae-panel); border: 1px solid var(--ae-line); border-radius: 10px; padding: 17px; min-width: 0; }
+    #audio-scoring-design .ae-metric-heading { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin-bottom: 12px; }
+    #audio-scoring-design .ae-metric-index { color: var(--ae-muted); font-size: 12px; }
+    #audio-scoring-design .ae-rule-details { margin-bottom: 13px; font-size: 12px; color: var(--ae-muted); }
+    #audio-scoring-design .ae-rule-details summary { color: var(--ae-blue); width: fit-content; }
+    #audio-scoring-design .ae-rule-reference { display: grid; grid-template-columns: 39px minmax(0, 1fr); padding: 6px 0; border-bottom: 1px solid var(--ae-line); gap: 8px; color: var(--ae-text); }
+    #audio-scoring-design .ae-score-box { min-width: 0; padding: 12px; background: var(--ae-bg); border-radius: 8px; }
+    #audio-scoring-design .ae-score-box-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 12px; }
+    #audio-scoring-design .ae-chosen-score { color: var(--ae-blue); font-weight: 600; }
+    #audio-scoring-design .ae-score-options { display: flex; flex-wrap: wrap; gap: 7px; }
+    #audio-scoring-design .ae-score-option { min-width: 38px; min-height: 38px; padding: 7px; font-weight: 500; border-radius: 6px; border: 1px solid var(--ae-line); color: var(--ae-text); background: var(--ae-panel); flex: 1 0 32px; max-width: 65px; }
+    #audio-scoring-design .ae-score-option[aria-pressed="true"] { background: var(--ae-blue); color: var(--ae-blue-ink); border-color: var(--ae-blue); }
+    #audio-scoring-design .ae-score-option:hover { border-color: var(--ae-blue); }
+    #audio-scoring-design .ae-selected-rule { min-height: 38px; margin-top: 8px !important; font-size: 12px; color: var(--ae-muted); }
+    #audio-scoring-design .ae-answer-gsb { display: flex; gap: 9px; flex-wrap: wrap; }
+    #audio-scoring-design .ae-answer-gsb .ae-score-option { max-width: none; }
+    #audio-scoring-design .ae-comment-label { display: flex; align-items: center; justify-content: space-between; font-size: 12px; margin-bottom: 8px; }
+    #audio-scoring-design .ae-comment-input { font-size: 12px; min-height: 92px; }
+    #audio-scoring-design .ae-answer-footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; border-top: 1px solid var(--ae-line); margin-top: 19px; padding-top: 16px; }
+    #audio-scoring-design .ae-answer-actions { display: flex; gap: 9px; }
+    #audio-scoring-design .ae-banner { padding: 10px 15px; background: var(--ae-soft); color: var(--ae-blue); border-radius: 7px; margin: 0 0 15px; font-size: 12px; }
+    #audio-scoring-design .ae-lane { min-width: 0; }
+    #audio-scoring-design .ae-lane .ae-score-box { padding: 0; background: transparent; }
+    #audio-scoring-design .ae-lane .ae-selected-rule { min-height: 57px; }
+    #audio-scoring-design .ae-design-status { font-size: 12px; color: var(--ae-muted); padding: 10px 22px; border-top: 1px solid var(--ae-line); background: var(--ae-panel); }
+    #audio-scoring-design .ae-saved { color: var(--ae-green); }
+    #audio-scoring-design .ae-required { color: var(--ae-error); }
+    #audio-scoring-design .ae-status-message { padding: 10px 22px; background: var(--ae-soft); color: var(--ae-blue); border-top: 1px solid var(--ae-line); font-size: 12px; }
+    @media (max-width: 780px) {
+      #audio-scoring-design .ae-workspace { grid-template-columns: 145px minmax(0,1fr); gap: 13px; padding: 16px; }
+      #audio-scoring-design .ae-editor-body { padding: 16px; }
+      #audio-scoring-design .ae-range { grid-template-columns: repeat(3, minmax(0,1fr)); }
+      #audio-scoring-design .ae-range .ae-button { grid-column: 1 / -1; }
+    }
+    @media (max-width: 600px) {
+      #audio-scoring-design .ae-header { padding: 14px; }
+      #audio-scoring-design h1 { font-size: 17px; }
+      #audio-scoring-design .ae-header > .ae-button { margin-left: 50px; }
+      #audio-scoring-design .ae-workspace { display: block; padding: 12px; }
+      #audio-scoring-design .ae-sidebar { margin-bottom: 13px; }
+      #audio-scoring-design .ae-metric-list { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+      #audio-scoring-design .ae-metric-nav { background: var(--ae-panel); border-color: var(--ae-line); margin: 0; padding: 9px; }
+      #audio-scoring-design .ae-sidebar-label, #audio-scoring-design .ae-sidebar-foot { display: none; }
+      #audio-scoring-design .ae-editor-heading, #audio-scoring-design .ae-editor-body, #audio-scoring-design .ae-footer { padding: 14px; }
+      #audio-scoring-design .ae-form-grid { grid-template-columns: 1fr; gap: 12px; }
+      #audio-scoring-design .ae-modes { grid-template-columns: 1fr; }
+      #audio-scoring-design .ae-answer { padding: 12px; }
+      #audio-scoring-design .ae-audio-grid, #audio-scoring-design .ae-score-grid, #audio-scoring-design .ae-comment-grid, #audio-scoring-design .ae-lane-grid { grid-template-columns: 1fr; gap: 10px; }
+      #audio-scoring-design .ae-transcript { display: block; }
+      #audio-scoring-design .ae-transcript-label { margin-bottom: 5px; }
+      #audio-scoring-design .ae-answer-metric { padding: 13px; }
+      #audio-scoring-design .ae-footer-caption { max-width: 155px; }
+      #audio-scoring-design .ae-input { font-size: 16px; }
+      #audio-scoring-design .ae-rule-input, #audio-scoring-design .ae-comment-input { font-size: 14px; }
+      #audio-scoring-design .ae-score-option, #audio-scoring-design .ae-button, #audio-scoring-design .ae-metric-nav { min-height: 44px; }
+    }
+  </style>
+
+  <div class="ae-shell">
+    <header class="ae-header">
+      <div class="ae-brand"><i data-lucide="audio-lines" aria-hidden="true"></i></div>
+      <div class="ae-header-text">
+        <div class="ae-eyebrow" data-ui="breadcrumb">问卷管理 / 测评维度</div>
+        <h1>金刚 I、II 型机器人情绪测评问卷</h1>
+      </div>
+      <button type="button" class="ae-button" data-action="switch-view"><i data-lucide="eye" aria-hidden="true"></i><span data-ui="view-label">预览答卷</span></button>
+    </header>
+
+    <div data-ui="admin-view" class="ae-workspace">
+      <aside class="ae-sidebar" aria-label="测评维度列表">
+        <div class="ae-sidebar-label"><span>测评维度</span><span>4 项</span></div>
+        <nav class="ae-metric-list" data-ui="metric-list" aria-label="选择要配置的维度"></nav>
+        <div class="ae-sidebar-foot">每个维度可独立配置作答方式。</div>
+      </aside>
+      <section class="ae-editor" aria-label="维度打分配置">
+        <div class="ae-editor-heading"><h2 data-ui="editor-title">自然度</h2><span class="ae-tag ae-tag-blue" data-ui="editor-tag">量化打分</span></div>
+        <div class="ae-editor-body">
+          <div class="ae-form-grid">
+            <label class="ae-field"><span class="ae-field-title">维度名称 <span class="ae-required">*</span></span><input class="ae-input" data-ui="dimension-name" aria-label="维度名称" maxlength="30" value="自然度"></label>
+            <label class="ae-field"><span class="ae-field-title">维度类型</span><input class="ae-input" data-ui="dimension-type" aria-label="维度类型" readonly value="通用维度"></label>
+          </div>
+          <div data-ui="numeric-settings">
+            <section class="ae-section">
+              <div class="ae-section-title"><h3>打分方法</h3></div>
+              <div class="ae-modes" role="group" aria-label="打分方法">
+                <button type="button" class="ae-mode" data-mode="gsb" aria-pressed="false"><span>GSB 对比<span class="ae-radio-dot" aria-hidden="true"></span></span><small>A 更好 / 差不多 / B 更好</small></button>
+                <button type="button" class="ae-mode" data-mode="numeric" aria-pressed="true"><span>量化打分<span class="ae-radio-dot" aria-hidden="true"></span></span><small>A、B 两个音频分别给分</small></button>
+              </div>
+            </section>
+            <section class="ae-section" data-ui="numeric-form">
+              <div class="ae-section-title"><h3>分值区间</h3><small>离散分值，每档对应一条规则</small></div>
+              <div class="ae-range">
+                <label class="ae-field"><span class="ae-field-title">最低分</span><input class="ae-input" data-ui="minimum" aria-label="最低分" type="number" step="any" value="1"></label>
+                <label class="ae-field"><span class="ae-field-title">最高分</span><input class="ae-input" data-ui="maximum" aria-label="最高分" type="number" step="any" value="5"></label>
+                <label class="ae-field"><span class="ae-field-title">步长</span><select class="ae-input" data-ui="step" aria-label="分值步长"><option value="1">1 分</option><option value="0.5">0.5 分</option><option value="0.1">0.1 分</option><option value="5">5 分</option><option value="10">10 分</option></select></label>
+                <button class="ae-button" type="button" data-action="generate">生成分值</button>
+              </div>
+              <div class="ae-inline-error" data-ui="range-error" role="alert" hidden></div>
+              <div class="ae-section">
+                <div class="ae-section-title"><h3>逐分值判定规则 <span class="ae-required">*</span></h3><small data-ui="rule-count">已填写 5 / 5</small></div>
+                <div class="ae-rubric-head"><span>分值</span><span>判定规则 · 答卷时可查看</span></div>
+                <div data-ui="rules"></div>
+                <p class="ae-help">新增分值的规则须补全后才能保存，不沿用相邻分值的规则。</p>
+              </div>
+            </section>
+            <section class="ae-section" data-ui="gsb-form" hidden>
+              <div class="ae-section-title"><h3>对比选项</h3><small>每组只选择一项</small></div>
+              <div class="ae-gsb-sample"><span>A 更好</span><span>差不多</span><span>B 更好</span></div>
+              <p class="ae-help">保留原 GSB 作答方式，不生成两个音频的独立分数。</p>
+            </section>
+            <div class="ae-context" data-ui="group-context" hidden></div>
+          </div>
+          <div class="ae-text-settings" data-ui="text-settings" hidden>
+            <div><div class="ae-section-title"><h3>作答方式</h3><span class="ae-tag">开放文本</span></div><p class="ae-help">音频 A、B 各填写一条，不计入量化得分。</p></div>
+            <label class="ae-field"><span class="ae-field-title">填写引导 <span class="ae-required">*</span></span><textarea class="ae-input" data-ui="text-prompt" aria-label="其他维度填写引导" rows="3" maxlength="200">请描述该音频中值得关注的表现，如停顿、重音、情绪表达或异常片段。</textarea></label>
+            <label class="ae-check"><input type="checkbox" data-ui="text-required"><span>设为必填</span><span class="ae-tag">默认选填</span></label>
+            <div class="ae-text-demo"><h3>答卷中的「其他」</h3><p>分别记录每个音频的观察，保留组别与音频对应关系，供后续自然语言分析。</p><div class="ae-comment-grid"><div><div class="ae-comment-label">音频 A</div><div class="ae-input ae-help">例如：句尾停顿偏长，听起来略显生硬。</div></div><div><div class="ae-comment-label">音频 B</div><div class="ae-input ae-help">例如：“太棒了”的开心感不够明显。</div></div></div></div>
+          </div>
+          <div class="ae-inline-error" data-ui="save-error" role="alert" hidden></div>
+        </div>
+        <footer class="ae-footer"><span class="ae-footer-caption" data-ui="editor-footnote">每个音频独立作答，允许同分。</span><button class="ae-button ae-button-primary" type="button" data-action="save">保存配置</button></footer>
+      </section>
+    </div>
+
+    <section data-ui="respondent-view" class="ae-answer" aria-label="答卷页面设计" hidden>
+      <div class="ae-question-heading"><div><h2>第 1 组 · 试听与评分</h2><div class="ae-question-meta"><span class="ae-tag">盲测 · 音频 A / B</span><span class="ae-tag ae-tag-blue">目标情绪：开心</span></div></div><span class="ae-count" data-ui="answer-progress" aria-live="polite">已评分 0 / 6</span></div>
+      <div class="ae-transcript"><span class="ae-transcript-label">试读文本</span><span>“太棒了！终于等到这一天，我们一起出发吧。”</span></div>
+      <div class="viz-carousel" aria-label="答卷评分布局方案" data-previous-label="上一个方案" data-next-label="下一个方案">
+        <section data-variant="按维度对照" aria-label="按维度对照评分方案"><div data-ui="comparison-layout"></div></section>
+        <section data-variant="按音频分栏" aria-label="按音频分栏评分方案" hidden><div data-ui="audio-layout"></div></section>
+      </div>
+      <div class="ae-inline-error" data-ui="answer-error" role="alert" hidden></div>
+      <footer class="ae-answer-footer"><span class="ae-footer-caption" data-ui="answer-caption">同一维度分别评价 A、B，不需要二选一。</span><div class="ae-answer-actions"><button class="ae-button" type="button" disabled>上一组</button><button class="ae-button ae-button-primary" type="button" data-action="next">下一组<i data-lucide="arrow-right" aria-hidden="true"></i></button></div></footer>
+    </section>
+    <div class="ae-status-message" data-ui="status" role="status" hidden></div>
+    <div class="ae-design-status">设计预览 · 使用示例规则与音频信息 · 不修改实际问卷</div>
+  </div>
+  <script>
+    (() => {
+      const root = document.getElementById('audio-scoring-design');
+      const node = name => root.querySelector(`[data-ui="${name}"]`);
+      const escapeText = value => String(value).replace(/[&<>"']/g, character => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[character]));
+      const defaults = () => ({
+        version: 1,
+        active: 'naturalness',
+        view: 'admin',
+        showRules: false,
+        metrics: [
+          { id:'naturalness', name:'自然度', kind:'通用维度', mode:'numeric', min:1, max:5, step:1, rules:{'1':'机械感明显，断句或重音严重异常，难以自然理解。','2':'多处停顿或语调不自然，明显影响听感。','3':'整体可理解，偶有生硬停顿或重音偏差。','4':'语流自然，仅有个别细微的不流畅。','5':'停顿、语调与节奏均自然，接近真实交流。'} },
+          { id:'similarity', name:'音色相似度', kind:'音色相似度', mode:'numeric', min:1, max:5, step:1, rules:{'1':'音色与参考音频明显不同，几乎没有相似特征。','2':'少量特征接近，但整体声音身份明显不同。','3':'部分音色特征相似，仍能听出较大差异。','4':'整体音色接近参考，只有细微差异。','5':'音色高度一致，几乎无法区分声音身份。'} },
+          { id:'emotion', name:'情绪准确度', kind:'情绪准确度', mode:'numeric', min:1, max:5, step:1, rules:{'1':'表达的情绪与目标相反，或明显属于其他情绪。','2':'目标情绪很难辨认，表达主要呈现中性或偏离。','3':'可以辨认目标情绪，但强度或语境适配不足。','4':'目标情绪清晰，强度基本合适，仅有细微偏差。','5':'目标情绪准确、自然，强度与语境完全匹配。'} },
+          { id:'other', name:'其他', kind:'其他（开放文本）', mode:'text', prompt:'请描述该音频中值得关注的表现，如停顿、重音、情绪表达或异常片段。', required:false }
+        ],
+        scores: {},
+        comparisons: {},
+        comments: {A:'', B:''}
+      });
+      let state = defaults();
+      const activeMetric = () => state.metrics.find(metric => metric.id === state.active);
+      const scale = metric => Array.from({length:Math.round((metric.max-metric.min)/metric.step)+1}, (_,index) => Number((metric.min+index*metric.step).toFixed(4)));
+      const announce = text => { node('status').textContent = text; node('status').hidden = !text; };
+      function remember() {
+        if (!window.openai?.setWidgetState) return;
+        const snapshot = {modelContent:{screen:state.view, activeDimension:activeMetric().name, dimensions:state.metrics.map(metric => ({name:metric.name, method:metric.mode, min:metric.min, max:metric.max, step:metric.step})), otherRequired:state.metrics[3].required}, privateContent:state};
+        if (JSON.stringify(snapshot).length < 14500) window.openai.setWidgetState(snapshot).catch(() => {});
+      }
+      function restore(snapshot) {
+        const saved = snapshot?.privateContent;
+        if (!saved || saved.version !== 1 || !Array.isArray(saved.metrics) || saved.metrics.length !== 4) return;
+        const fresh = defaults();
+        if (saved.metrics.some((metric,index) => metric.id !== fresh.metrics[index].id || (metric.mode !== 'text' && (!Number.isFinite(metric.min) || !Number.isFinite(metric.max) || !Number.isFinite(metric.step) || metric.step <= 0 || metric.max <= metric.min || (metric.max-metric.min)/metric.step > 100)))) return;
+        state = {...fresh, ...saved, active:fresh.metrics.some(metric => metric.id === saved.active) ? saved.active : fresh.active};
+      }
+      function renderNavigation() {
+        node('metric-list').innerHTML = state.metrics.map(metric => `<button class="ae-metric-nav" type="button" data-metric="${metric.id}" aria-pressed="${metric.id === state.active}"><span class="ae-nav-title">${escapeText(metric.name)}${metric.id === state.active ? '<span aria-hidden="true">›</span>' : ''}</span><span class="ae-nav-desc">${metric.mode === 'text' ? '开放文本 · '+(metric.required?'必填':'选填') : metric.mode === 'gsb' ? 'GSB · 三选一' : `${metric.min}–${metric.max} 分 · 两个音频分别评分`}</span></button>`).join('');
+      }
+      function updateRuleCount() {
+        const metric = activeMetric();
+        if (metric.mode !== 'numeric') return;
+        const points = scale(metric);
+        node('rule-count').textContent = `已填写 ${points.filter(point => metric.rules[point]?.trim()).length} / ${points.length}`;
+      }
+      function fitRules() {
+        root.querySelectorAll('[data-rule]').forEach(field => {
+          if (!field.offsetWidth) return;
+          field.style.height = 'auto';
+          field.style.height = `${Math.max(38, field.scrollHeight + 2)}px`;
+        });
+      }
+      function renderRules() {
+        const metric = activeMetric();
+        node('rules').innerHTML = scale(metric).map(point => `<label class="ae-rule-row"><span class="ae-score-label">${point} 分</span><textarea class="ae-input ae-rule-input" data-rule="${point}" aria-label="${point}分判定规则" rows="1" maxlength="160" placeholder="请填写 ${point} 分的判定规则" required>${escapeText(metric.rules[point] || '')}</textarea></label>`).join('');
+        updateRuleCount();
+        fitRules();
+      }
+      function renderEditor() {
+        const metric = activeMetric();
+        renderNavigation();
+        node('editor-title').textContent = metric.name;
+        node('editor-tag').textContent = metric.mode === 'text' ? '开放文本' : metric.mode === 'gsb' ? 'GSB 对比' : '量化打分';
+        node('dimension-name').value = metric.name;
+        node('dimension-type').value = metric.kind;
+        node('numeric-settings').hidden = metric.mode === 'text';
+        node('text-settings').hidden = metric.mode !== 'text';
+        node('save-error').hidden = true;
+        node('range-error').hidden = true;
+        node('editor-footnote').textContent = metric.mode === 'text' ? '开放反馈单独记录，不计入数值评分。' : metric.mode === 'gsb' ? '保留原有 GSB 三选一逻辑。' : '每个音频独立作答，允许同分。';
+        if (metric.mode === 'text') {
+          node('text-prompt').value = metric.prompt;
+          node('text-required').checked = metric.required;
+          return;
+        }
+        root.querySelectorAll('[data-mode]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.mode === metric.mode)));
+        node('numeric-form').hidden = metric.mode !== 'numeric';
+        node('gsb-form').hidden = metric.mode !== 'gsb';
+        node('minimum').value = metric.min;
+        node('maximum').value = metric.max;
+        node('step').value = metric.step;
+        node('group-context').hidden = metric.id === 'naturalness';
+        node('group-context').textContent = metric.id === 'emotion' ? '沿用组别配置：开心 → 开心-001、开心-002；当前示例目标为「开心」。' : '沿用参考音频与目标组别配置；仅对指定组别展示。';
+        renderRules();
+      }
+      function player(audio) {
+        return `<div class="ae-player"><div class="ae-player-heading"><span class="ae-audio-name"><span class="ae-audio-letter">${audio}</span>音频 ${audio}</span><span class="ae-count">00:00 / 00:08</span></div><div class="ae-player-track"><button type="button" class="ae-play" disabled aria-label="音频${audio}试听示意"><i data-lucide="play" aria-hidden="true"></i></button><div class="ae-wave" aria-hidden="true">${'<span></span>'.repeat(43)}</div></div><div class="ae-player-note">播放器示意 · 不含真实音频</div></div>`;
+      }
+      function references(metric) {
+        if (metric.mode !== 'numeric') return '';
+        return `<details class="ae-rule-details" data-reference="${metric.id}" ${state.showRules?'open':''}><summary>查看 ${scale(metric).length} 档判定规则</summary>${scale(metric).map(point => `<div class="ae-rule-reference"><span>${point} 分</span><span>${escapeText(metric.rules[point] || '待补充判定规则')}</span></div>`).join('')}</details>`;
+      }
+      function scoreBox(metric, audio) {
+        const chosen = state.scores[metric.id]?.[audio];
+        return `<div class="ae-score-box" role="group" aria-label="${escapeText(metric.name)}音频${audio}评分"><div class="ae-score-box-heading"><span>音频 ${audio}</span><span class="ae-chosen-score" data-score-label="${metric.id}-${audio}">${chosen === undefined ? '尚未评分' : `${chosen} 分`}</span></div><div class="ae-score-options">${scale(metric).map(point => `<button type="button" class="ae-score-option" data-score="${point}" data-score-metric="${metric.id}" data-audio="${audio}" aria-label="${escapeText(metric.name)} 音频${audio} ${point}分" aria-pressed="${chosen === point}">${point}</button>`).join('')}</div><p class="ae-selected-rule" data-selected-rule="${metric.id}-${audio}">${chosen === undefined ? '选择分值后显示对应判定规则。' : escapeText(metric.rules[chosen])}</p></div>`;
+      }
+      function gsButtons(metric) {
+        return `<div class="ae-answer-gsb" role="group" aria-label="${escapeText(metric.name)}GSB比较">${[['A','A 更好'],['same','差不多'],['B','B 更好']].map(([value,label]) => `<button type="button" class="ae-score-option" data-gsb="${value}" data-score-metric="${metric.id}" aria-pressed="${state.comparisons[metric.id] === value}">${label}</button>`).join('')}</div>`;
+      }
+      function metricHeading(metric,index) {
+        return `<div class="ae-metric-heading"><span class="ae-metric-index">${String(index+1).padStart(2,'0')}</span><h3>${escapeText(metric.name)}</h3><span class="ae-tag">${metric.mode === 'numeric' ? `${metric.min}–${metric.max} 分` : 'GSB 对比'}</span>${metric.id === 'emotion' ? '<span class="ae-tag ae-tag-blue">目标：开心</span>' : ''}${metric.id === 'similarity' ? '<button type="button" class="ae-button" disabled aria-label="参考音频试听示意"><i data-lucide="headphones" aria-hidden="true"></i>参考音频</button>' : ''}</div>`;
+      }
+      function commentBox(audio) {
+        return `<label class="ae-field"><span class="ae-comment-label"><span>音频 ${audio} 的其他观察</span><span class="ae-count" data-comment-count="${audio}">${state.comments[audio].length} / 500</span></span><textarea class="ae-input ae-comment-input" data-comment="${audio}" aria-label="音频${audio}其他观察" maxlength="500" rows="3" placeholder="${audio === 'A' ? '例如：句尾停顿偏长，听起来略显生硬。' : '例如：“太棒了”的开心感不够明显。'}">${escapeText(state.comments[audio])}</textarea></label>`;
+      }
+      function otherHeading() {
+        const metric = state.metrics[3];
+        return `<div class="ae-metric-heading"><span class="ae-metric-index">04</span><h3>${escapeText(metric.name)}</h3><span class="ae-tag">${metric.required?'必填':'选填'} · 不计分</span></div><p class="ae-help" style="margin:0 0 12px">${escapeText(metric.prompt)}</p>`;
+      }
+      function updateProgress() {
+        let total = 0;
+        let completed = 0;
+        state.metrics.filter(metric => metric.mode !== 'text').forEach(metric => {
+          total += metric.mode === 'numeric' ? 2 : 1;
+          completed += metric.mode === 'numeric' ? ['A','B'].filter(audio => state.scores[metric.id]?.[audio] !== undefined).length : Number(state.comparisons[metric.id] !== undefined);
+        });
+        node('answer-progress').textContent = `已评分 ${completed} / ${total}`;
+        return {total, completed};
+      }
+      function renderAnswers() {
+        const metrics = state.metrics.filter(metric => metric.mode !== 'text');
+        node('comparison-layout').innerHTML = `<div class="ae-audio-grid">${player('A')}${player('B')}</div>` + metrics.map((metric,index) => `<section class="ae-answer-metric">${metricHeading(metric,index)}${references(metric)}${metric.mode === 'numeric' ? `<div class="ae-score-grid">${scoreBox(metric,'A')}${scoreBox(metric,'B')}</div>` : gsButtons(metric)}</section>`).join('') + `<section class="ae-answer-metric">${otherHeading()}<div class="ae-comment-grid">${commentBox('A')}${commentBox('B')}</div></section>`;
+        node('audio-layout').innerHTML = `<div class="ae-lane-grid">${['A','B'].map(audio => `<div class="ae-lane">${player(audio)}${metrics.map((metric,index) => metric.mode === 'numeric' ? `<section class="ae-answer-metric">${metricHeading(metric,index)}${references(metric)}${scoreBox(metric,audio)}</section>` : '').join('')}<section class="ae-answer-metric">${otherHeading()}${commentBox(audio)}</section></div>`).join('')}</div>` + metrics.map((metric,index) => metric.mode === 'gsb' ? `<section class="ae-answer-metric">${metricHeading(metric,index)}${gsButtons(metric)}</section>` : '').join('');
+        node('answer-caption').textContent = metrics.every(metric => metric.mode === 'gsb') ? 'GSB 维度每组选择一项，其他观察分别填写。' : '量化维度分别评价 A、B，允许同分。';
+        updateProgress();
+        refreshIcons();
+      }
+      function refreshIcons() {
+        if (typeof lucide !== 'undefined') lucide.createIcons({attrs:{width:16,height:16}});
+      }
+      function renderView() {
+        node('admin-view').hidden = state.view !== 'admin';
+        node('respondent-view').hidden = state.view !== 'respondent';
+        node('breadcrumb').textContent = state.view === 'admin' ? '问卷管理 / 测评维度' : '答卷预览 / 独立音频评分';
+        node('view-label').textContent = state.view === 'admin' ? '预览答卷' : '返回指标配置';
+        if (state.view === 'admin') renderEditor(); else renderAnswers();
+      }
+      function validate() {
+        for (const metric of state.metrics) {
+          if (!metric.name.trim()) return {id:metric.id, text:'请填写维度名称。'};
+          if (metric.mode === 'text' && !metric.prompt.trim()) return {id:metric.id, text:'请填写「其他」维度的填写引导。'};
+          if (metric.mode === 'numeric') {
+            const missing = scale(metric).filter(point => !metric.rules[point]?.trim());
+            if (missing.length) return {id:metric.id, text:`「${metric.name}」还缺少 ${missing.join('、')} 分的判定规则，请补全。`};
+          }
+        }
+        return null;
+      }
+      function checkConfiguration() {
+        if (state.view === 'admin' && activeMetric().mode === 'numeric' && (Number(node('minimum').value) !== activeMetric().min || Number(node('maximum').value) !== activeMetric().max || Number(node('step').value) !== activeMetric().step)) {
+          node('save-error').textContent = '分值区间已改动，请先点击「生成分值」并补全规则。';
+          node('save-error').hidden = false;
+          return false;
+        }
+        const error = validate();
+        if (!error) return true;
+        state.active = error.id;
+        state.view = 'admin';
+        renderView();
+        node('save-error').textContent = error.text;
+        node('save-error').hidden = false;
+        return false;
+      }
+      root.addEventListener('click', event => {
+        const button = event.target.closest('button');
+        if (!button || button.disabled) return;
+        if (button.dataset.metric) {
+          state.active = button.dataset.metric;
+          renderEditor();
+          announce('');
+          remember();
+        } else if (button.dataset.mode) {
+          activeMetric().mode = button.dataset.mode;
+          renderEditor();
+          announce('');
+          remember();
+        } else if (button.dataset.action === 'generate') {
+          const minimum = Number(node('minimum').value);
+          const maximum = Number(node('maximum').value);
+          const step = Number(node('step').value);
+          const steps = (maximum-minimum)/step;
+          let error = '';
+          if (!node('minimum').value || !node('maximum').value || !Number.isFinite(minimum) || !Number.isFinite(maximum) || maximum <= minimum) error = '最高分必须大于最低分。';
+          else if (Math.abs(steps-Math.round(steps)) > .00001) error = '区间需被步长整除，以保证每个可选分值都有规则。';
+          else if (steps > 100) error = '预览最多展示 101 个分值，请调大步长。';
+          node('range-error').textContent = error;
+          node('range-error').hidden = !error;
+          if (error) return;
+          const metric = activeMetric();
+          metric.min = minimum; metric.max = maximum; metric.step = step;
+          const available = scale(metric);
+          if (state.scores[metric.id]) ['A','B'].forEach(audio => {if (!available.includes(state.scores[metric.id][audio])) delete state.scores[metric.id][audio];});
+          renderRules(); renderNavigation();
+          announce(`已生成 ${available.length} 个分值；保留同分值原规则，新增规则需填写。`);
+          remember();
+        } else if (button.dataset.action === 'save') {
+          if (!checkConfiguration()) return;
+          announce('配置已应用到本次设计预览。未写入真实问卷；可点击「预览答卷」试填。');
+          remember();
+        } else if (button.dataset.action === 'switch-view') {
+          if (state.view === 'admin' && !checkConfiguration()) return;
+          state.view = state.view === 'admin' ? 'respondent' : 'admin';
+          announce(''); renderView(); remember();
+        } else if (button.dataset.score !== undefined) {
+          const metricId = button.dataset.scoreMetric;
+          const audio = button.dataset.audio;
+          const value = Number(button.dataset.score);
+          state.scores[metricId] = {...state.scores[metricId], [audio]:value};
+          root.querySelectorAll(`[data-score-metric="${metricId}"][data-audio="${audio}"]`).forEach(option => option.setAttribute('aria-pressed', String(Number(option.dataset.score) === value)));
+          root.querySelectorAll(`[data-score-label="${metricId}-${audio}"]`).forEach(label => label.textContent = `${value} 分`);
+          root.querySelectorAll(`[data-selected-rule="${metricId}-${audio}"]`).forEach(label => label.textContent = state.metrics.find(metric => metric.id === metricId).rules[value]);
+          node('answer-error').hidden = true; updateProgress(); remember();
+        } else if (button.dataset.gsb) {
+          state.comparisons[button.dataset.scoreMetric] = button.dataset.gsb;
+          root.querySelectorAll(`[data-gsb][data-score-metric="${button.dataset.scoreMetric}"]`).forEach(option => option.setAttribute('aria-pressed', String(option.dataset.gsb === button.dataset.gsb)));
+          node('answer-error').hidden = true; updateProgress(); remember();
+        } else if (button.dataset.action === 'next') {
+          const progress = updateProgress();
+          const missingText = state.metrics[3].required && (!state.comments.A.trim() || !state.comments.B.trim());
+          if (progress.completed < progress.total || missingText) {
+            node('answer-error').textContent = progress.completed < progress.total ? `还有 ${progress.total-progress.completed} 项未评分，请分别完成两个音频的评分。` : '「其他」已设为必填，请分别填写音频 A、B 的观察。';
+            node('answer-error').hidden = false;
+            return;
+          }
+          node('answer-error').hidden = true;
+          announce('本组校验通过。设计预览到此结束，未提交任何真实答卷。');
+          remember();
+        }
+      });
+      root.addEventListener('input', event => {
+        const target = event.target;
+        if (target.dataset.rule !== undefined) {
+          activeMetric().rules[target.dataset.rule] = target.value;
+          updateRuleCount();
+          fitRules();
+          node('save-error').hidden = true;
+        } else if (target === node('dimension-name')) {
+          activeMetric().name = target.value;
+          node('editor-title').textContent = target.value || '未命名维度';
+          renderNavigation();
+        } else if (target === node('text-prompt')) state.metrics[3].prompt = target.value;
+        else if (target.dataset.comment) {
+          const audio = target.dataset.comment;
+          state.comments[audio] = target.value;
+          root.querySelectorAll(`[data-comment-count="${audio}"]`).forEach(count => count.textContent = `${target.value.length} / 500`);
+          root.querySelectorAll(`[data-comment="${audio}"]`).forEach(field => {if (field !== target) field.value = target.value;});
+          node('answer-error').hidden = true;
+        }
+      });
+      root.addEventListener('change', event => {
+        if (event.target === node('text-required')) {state.metrics[3].required = event.target.checked; renderNavigation();}
+        remember();
+      });
+      restore(window.openai?.widgetState);
+      renderView();
+      let measuredWidth = 0;
+      const layoutObserver = new ResizeObserver(entries => {
+        const width = entries[0].contentRect.width;
+        if (width === measuredWidth) return;
+        measuredWidth = width;
+        fitRules();
+      });
+      layoutObserver.observe(root);
+      window.addEventListener('openai:set_globals', event => {
+        const incoming = event.detail?.globals?.widgetState;
+        if (!incoming) return;
+        restore(incoming); renderView();
+      });
+      if (globalThis.Tweak) {
+        const preferences = {expandRules:state.showRules};
+        const tweak = new Tweak({container:node('respondent-view'), onChange:() => {
+          state.showRules = preferences.expandRules;
+          root.querySelectorAll('[data-reference]').forEach(details => details.open = state.showRules);
+          remember();
+        }});
+        tweak.addToggle(preferences, 'expandRules', {label:'默认展开判定规则'});
+      }
+    })();
+  </script>
+</div>
+</body>
+</html>

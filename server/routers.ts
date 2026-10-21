@@ -9,6 +9,8 @@ import { invokeLLM } from "./_core/llm";
 import * as db from "./db";
 import { TRPCError } from "@trpc/server";
 import { deriveGroupLabel } from "@shared/audioGroupLabels";
+import { readSubQuestionnairePlan } from "@shared/subQuestionnaires";
+import { allocateSubQuestionnaire, assertNoSubQuestionnairePlan, configureSubQuestionnaires, getAssignedSubQuestionnaire, getSubQuestionnaireDistribution, saveSubQuestionnaireAnswers } from "./subQuestionnaires";
 
 const uploadedAudioSchema = z.object({
   fileName: z.string().trim().min(1).max(255),
@@ -485,6 +487,7 @@ export const appRouter = router({
           throw new TRPCError({ code: "FORBIDDEN" });
         }
 
+        assertNoSubQuestionnairePlan(questionnaire);
         // 上传新音频并直接归属该问卷(不自动配对)。并行上传到 OSS(按日期+时间戳子文件夹归档),再顺序写库。
         const uploadResults = await Promise.all(
           input.audios.map((audioInput) => {
@@ -530,6 +533,9 @@ export const appRouter = router({
           throw new TRPCError({ code: "FORBIDDEN" });
         }
         for (const audioFileId of input.audioFileIds) {
+          const audio = await db.getAudioFileById(audioFileId);
+          if (!audio || audio.questionnaireId !== input.questionnaireId) throw new TRPCError({ code: "FORBIDDEN" });
+          assertNoSubQuestionnairePlan(questionnaire);
           await db.deleteAudioFile(audioFileId);
         }
         return { success: true };
@@ -546,6 +552,7 @@ export const appRouter = router({
         if (!questionnaire || questionnaire.creatorId !== ctx.user.id) {
           throw new TRPCError({ code: "FORBIDDEN" });
         }
+        assertNoSubQuestionnairePlan(questionnaire);
         return db.fillMissingAudioGroupLabels(input.questionnaireId);
       }),
 
@@ -562,6 +569,7 @@ export const appRouter = router({
         if (!questionnaire || questionnaire.creatorId !== ctx.user.id) {
           throw new TRPCError({ code: "FORBIDDEN" });
         }
+        assertNoSubQuestionnairePlan(questionnaire);
         const requestedIds = new Set(input.items.map(item => item.audioFileId));
         if (requestedIds.size !== input.items.length) {
           throw new TRPCError({ code: "BAD_REQUEST", message: "同一音频不能重复提交组别" });
@@ -588,6 +596,7 @@ export const appRouter = router({
         if (!questionnaire || questionnaire.creatorId !== ctx.user.id) {
           throw new TRPCError({ code: "FORBIDDEN" });
         }
+        assertNoSubQuestionnairePlan(questionnaire);
         await rebuildQuestionnairePairs(input.questionnaireId);
         const pairs = await db.getBlindTestPairsByQuestionnaire(input.questionnaireId);
         return { success: true, pairsCount: pairs.length };
@@ -598,6 +607,13 @@ export const appRouter = router({
    * Questionnaire management
    */
   questionnaire: router({
+    distribution: adminProcedure
+      .input(z.object({ questionnaireId: z.number().int().positive() }))
+      .query(({ input, ctx }) => getSubQuestionnaireDistribution(input.questionnaireId, ctx.user.id)),
+
+    configureDistribution: adminProcedure
+      .input(z.object({ questionnaireId: z.number().int().positive(), enabled: z.boolean(), groupsPerForm: z.number().int().min(1).max(10000), quota: z.number().int().min(1).max(10000) }))
+      .mutation(({ input, ctx }) => configureSubQuestionnaires(input, ctx.user.id)),
     /**
      * Generate questions using AI
      */
@@ -755,7 +771,7 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
      * Get questionnaire by share token (public access)
      */
     getByShareToken: publicProcedure
-      .input(z.object({ shareToken: z.string() }))
+      .input(z.object({ shareToken: z.string(), responseId: z.number().int().positive().optional(), visitorToken: z.string().max(64).optional() }))
       .query(async ({ input }) => {
         const questionnaire = await db.getQuestionnaireByShareToken(input.shareToken);
         if (!questionnaire) {
@@ -763,7 +779,10 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
         }
 
         // Get blind test pairs with audio info（附带 groupLabel，供答题端按组条件展示音色相似度维度）
-        const pairs = await db.getBlindTestPairsByQuestionnaire(questionnaire.id);
+        const plan = readSubQuestionnairePlan(questionnaire.subQuestionnairePlan);
+        const assigned = plan && input.responseId ? await getAssignedSubQuestionnaire(questionnaire.id, input.responseId, input.visitorToken) : null;
+        const allPairs = !plan || assigned ? await db.getBlindTestPairsByQuestionnaire(questionnaire.id) : [];
+        const pairs = plan ? allPairs.filter(pair => assigned?.pairIds.includes(pair.id)) : allPairs;
         const pairsWithAudio = await Promise.all(
           pairs.map(async (pair) => {
             const leftAudio = await db.getAudioFileById(pair.leftAudioFileId);
@@ -803,6 +822,8 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
 
         return {
           ...questionnaire,
+          subQuestionnairePlan: undefined,
+          distribution: plan ? { formCount: plan.forms.length, minGroups: Math.min(...plan.forms.map(form => form.groupLabels.length)), maxGroups: Math.max(...plan.forms.map(form => form.groupLabels.length)) } : null,
           blindTestPairs: pairsWithAudio,
           dimensions,
         };
@@ -850,6 +871,7 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
 
         // 发放样本组数:0 或 null 都归一为 null(发放全部组);>0 则按组抽样
         if (input.sampleSize !== undefined) {
+          assertNoSubQuestionnairePlan(questionnaire);
           updates.sampleSize = input.sampleSize && input.sampleSize > 0 ? input.sampleSize : null;
         }
 
@@ -1119,8 +1141,8 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
     startPublic: publicProcedure
       .input(z.object({
         questionnaireId: z.number(),
-        visitorName: z.string().min(1, "请输入姓名"),
-        visitorToken: z.string().optional(), // 浏览器级稳定标识,用于区分同 IP 的不同访客
+        visitorName: z.string().trim().min(1, "请输入姓名").max(255),
+        visitorToken: z.string().max(64).optional(), // 浏览器级稳定标识,用于区分同 IP 的不同访客
       }))
       .mutation(async ({ input, ctx }) => {
         const questionnaire = await db.getQuestionnaireById(input.questionnaireId);
@@ -1139,6 +1161,12 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
         const visitorIp = ((ctx.req.headers["x-forwarded-for"] as string) || "").split(",")[0] || ctx.req.socket?.remoteAddress || "unknown";
         const visitorToken = input.visitorToken || "";
         const visitorName = input.visitorName;
+
+        if (questionnaire.subQuestionnairePlan != null) {
+          const assignment = await allocateSubQuestionnaire({ questionnaireId: input.questionnaireId, visitorName, visitorToken, visitorIp });
+          const savedAnswers = assignment.resumed ? await db.getAnswersByResponse(assignment.responseId) : [];
+          return { responseId: assignment.responseId, subQuestionnaireIndex: assignment.form.index, sampledGroupLabels: assignment.form.groupLabels, savedAnswers: savedAnswers.map(answer => ({ blindTestPairId: answer.blindTestPairId, evaluationDimensionId: answer.evaluationDimensionId, blindTestChoice: answer.blindTestChoice })) };
+        }
 
         // 复用同问卷、同 IP、同姓名未提交的 in_progress 记录,避免同一个人每次进入都新建脏数据。
         // 唯一键用 IP+姓名(而非 visitorToken):同一浏览器换姓名即视为不同答卷人,不会复用/覆盖他人答卷。
@@ -1218,6 +1246,7 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
           throw new TRPCError({ code: "BAD_REQUEST", message: "Questionnaire has expired" });
         }
 
+        if (questionnaire.subQuestionnairePlan != null) throw new TRPCError({ code: "BAD_REQUEST", message: "此问卷按子问卷限额发放，请使用公开分享链接领取" });
         // Check if user already has a response
         let response = await db.getUserResponse(ctx.user.id, input.questionnaireId);
         if (!response) {
@@ -1250,6 +1279,7 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
     saveProgressPublic: publicProcedure
       .input(z.object({
         responseId: z.number(),
+        visitorToken: z.string().max(64).optional(),
         answers: z.array(z.object({
           questionId: z.number().optional(),
           evaluationDimensionId: z.number().optional(),
@@ -1263,6 +1293,7 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
         if (!response) {
           throw new TRPCError({ code: "NOT_FOUND" });
         }
+        if (response.subQuestionnaireIndex != null) return saveSubQuestionnaireAnswers(input, false);
         // 已提交的答卷不允许再改
         if (response.status === "submitted") {
           throw new TRPCError({ code: "BAD_REQUEST", message: "答卷已提交,无法再修改" });
@@ -1291,6 +1322,7 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
     submitPublic: publicProcedure
       .input(z.object({
         responseId: z.number(),
+        visitorToken: z.string().max(64).optional(),
         answers: z.array(z.object({
           questionId: z.number().optional(),
           evaluationDimensionId: z.number().optional(),
@@ -1305,6 +1337,7 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
           throw new TRPCError({ code: "NOT_FOUND" });
         }
 
+        if (response.subQuestionnaireIndex != null) return saveSubQuestionnaireAnswers(input, true);
         // 服务端全量校验:盲测问卷必须覆盖全部 pairs × 全部 dimensions,
         // 防止前端漏组/异常客户端导致残缺样本入库(判断次数不足)。
         if (response.questionnaireId) {

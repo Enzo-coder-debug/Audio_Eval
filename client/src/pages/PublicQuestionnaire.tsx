@@ -58,6 +58,8 @@ function clearPairIndex(responseId: number) {
 export default function PublicQuestionnaire() {
   const { shareToken } = useParams();
   const [visitorName, setVisitorName] = useState("");
+  const [visitorToken] = useState(() => getVisitorToken() || `${Date.now()}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`);
+  const [subQuestionnaireIndex, setSubQuestionnaireIndex] = useState<number | null>(null);
   const [hasStarted, setHasStarted] = useState(false);
   const [responseId, setResponseId] = useState<number | null>(null);
   const [currentPairIndex, setCurrentPairIndex] = useState(0);
@@ -90,7 +92,7 @@ export default function PublicQuestionnaire() {
 
   // Fetch questionnaire data
   const { data: questionnaire, isLoading, error } = trpc.questionnaire.getByShareToken.useQuery(
-    { shareToken: shareToken || "" },
+    { shareToken: shareToken || "", ...(subQuestionnaireIndex != null && responseId != null ? { responseId, visitorToken } : {}) },
     { enabled: !!shareToken }
   );
 
@@ -108,6 +110,7 @@ export default function PublicQuestionnaire() {
   const startMutation = trpc.response.startPublic.useMutation({
     onSuccess: (data) => {
       setResponseId(data.responseId);
+      setSubQuestionnaireIndex("subQuestionnaireIndex" in data ? data.subQuestionnaireIndex ?? null : null);
       setHasStarted(true);
       // 抽样发放:锚定后端返回的组别子集(可能为 null=全部)。后续 pairs 全部按此过滤。
       setSampledGroupLabels(data.sampledGroupLabels ?? null);
@@ -153,7 +156,7 @@ export default function PublicQuestionnaire() {
   // 消费后清空 snapshot,防止后续 refetch 触发的重跑再次覆盖用户新的作答。
   useEffect(() => {
     const pairs = visiblePairs;
-    if (!pairs) return;
+    if (!pairs || pairs.length === 0) return;
     setPairAnswers((prev) => {
       const prevById = new Map(prev.map((p) => [p.blindTestPairId, p]));
       // 服务端快照按 (pairId, dimId) 聚合成 choices
@@ -272,7 +275,7 @@ export default function PublicQuestionnaire() {
     startMutation.mutate({
       questionnaireId: questionnaire.id,
       visitorName: visitorName.trim(),
-      visitorToken: getVisitorToken(),
+      visitorToken,
     });
   };
 
@@ -308,7 +311,7 @@ export default function PublicQuestionnaire() {
     // 空作答(初始加载或全被清空)不必去服务端 delete,避免不必要请求
     if (allAnswers.length === 0) return;
     const timer = window.setTimeout(() => {
-      saveProgressMutation.mutate({ responseId, answers: allAnswers });
+      saveProgressMutation.mutate({ responseId, visitorToken, answers: allAnswers });
     }, 800);
     return () => window.clearTimeout(timer);
     // saveProgressMutation 引用稳定,不放入依赖避免无谓重跑
@@ -418,6 +421,7 @@ export default function PublicQuestionnaire() {
 
     submitMutation.mutate({
       responseId,
+      visitorToken,
       answers: allAnswers,
     });
   };
@@ -472,7 +476,9 @@ export default function PublicQuestionnaire() {
                 <p className="text-gray-600 mt-2">{questionnaire.description}</p>
               )}
               <p className="text-sm text-gray-500 mt-4">
-                {(questionnaire as any).sampleSize && (questionnaire as any).sampleSize > 0
+                {questionnaire.distribution
+                  ? `将从 ${questionnaire.distribution.formCount} 张预设子问卷中随机领取一张，每张 ${questionnaire.distribution.minGroups === questionnaire.distribution.maxGroups ? questionnaire.distribution.minGroups : `${questionnaire.distribution.minGroups}–${questionnaire.distribution.maxGroups}`} 个组别（同组全部配对一起发放）`
+                  : (questionnaire as any).sampleSize && (questionnaire as any).sampleSize > 0
                   ? `将从题库中随机抽取 ${(questionnaire as any).sampleSize} 组供你测评`
                   : `共 ${questionnaire.blindTestPairs?.length || 0} 组音频对比`}
                 {questionnaire.dimensions?.length > 0 && `，${questionnaire.dimensions.length} 个评分维度`}
@@ -500,6 +506,7 @@ export default function PublicQuestionnaire() {
             )}
 
             <div className="space-y-2">
+              {questionnaire.distribution && <p className="text-xs text-slate-500">开始后占用一份名额；同一浏览器、同一姓名可续答，不会重新抽取。请勿重复领取。</p>}
               <label className="text-sm font-medium text-gray-700">
                 请输入您的姓名 <span className="text-red-500">*</span>
               </label>
@@ -527,6 +534,9 @@ export default function PublicQuestionnaire() {
   }
 
   // Main blind test interface
+  if (visiblePairs.length === 0) {
+    return <div className="min-h-screen flex items-center justify-center bg-gray-50 p-6"><p role="alert" className="text-sm text-slate-700">所分配问卷暂无可用配对，请刷新重试或联系管理员。已有领取记录不会重复占用名额。</p></div>;
+  }
   const currentPair = visiblePairs[currentPairIndex];
   const totalPairs = visiblePairs.length;
   const progressPercent = ((currentPairIndex + 1) / totalPairs) * 100;
@@ -547,6 +557,7 @@ export default function PublicQuestionnaire() {
   return (
     <div className="min-h-screen bg-gray-50 py-6 px-4">
       <div className="max-w-3xl mx-auto space-y-6">
+        {subQuestionnaireIndex != null && <p className="text-sm text-blue-700">已分配：子问卷 {subQuestionnaireIndex} · {sampledGroupLabels?.length ?? 0} 个组别 · {visiblePairs.length} 对音频</p>}
         {/* Progress Header */}
         <div className="flex items-center gap-4">
           <span className="text-sm font-medium text-gray-700 whitespace-nowrap">
