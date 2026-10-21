@@ -163,6 +163,7 @@ export const answers = mysqlTable("answers", {
   // For subjective: text content
   answerContent: longtext("answerContent"), // Can be null for blind test choices
   blindTestChoice: mysqlEnum("blindTestChoice", ["left_better", "same", "right_better"]), // For blind tests
+  audioEvaluation: json("audioEvaluation").$type<import("../shared/scoring").AudioEvaluation>(),
 
   score: decimal("score", { precision: 5, scale: 2 }),
   feedback: longtext("feedback"), // AI feedback for this specific answer
@@ -211,6 +212,7 @@ export const evaluationDimensions = mysqlTable("evaluationDimensions", {
   targetGroupLabels: text("targetGroupLabels"),
   // 情绪类别与对应音频组别，仅 emotion_accuracy 使用。
   emotionCategories: json("emotionCategories").$type<{ name: string; groupLabels: string[] }[]>(),
+  scoringConfig: json("scoringConfig").$type<import("../shared/scoring").ScoringConfig>(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });

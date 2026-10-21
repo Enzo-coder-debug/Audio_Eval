@@ -7,6 +7,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Checkbox } from "@/components/ui/checkbox";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, Cell } from "recharts";
 import { ArrowLeft, Loader2, TrendingUp, Filter } from "lucide-react";
+import { NumericScoringSummary } from "@/components/NumericScoringSummary";
 
 // 置信度徽标:根据显著性与置信度着色
 function ConfidenceBadge({ significant, confidence }: { significant: boolean; confidence: number }) {
@@ -125,7 +126,7 @@ export default function QuestionnaireAnalytics() {
                 {r.visitorName}
                 <br />
                 <span className="text-xs text-slate-500">
-                  {r.judgmentCount} 次判断
+                  {r.judgmentCount} 条作答记录
                   {r.submittedAt ? `｜${new Date(r.submittedAt).toLocaleString()}` : ""}
                 </span>
               </span>
@@ -145,9 +146,10 @@ export default function QuestionnaireAnalytics() {
             返回问卷
           </Button>
           {filterPanel}
+          <NumericScoringSummary {...data} />
           <Card>
             <CardContent className="pt-12 text-center">
-              <p className="text-slate-600">暂无可分析的盲测数据（需要有人完成答卷后才能生成对比结论，或当前所选样本无有效判断）</p>
+              <p className="text-slate-600">当前样本暂无 GSB 对比数据。量化评分及文本反馈单独汇总，不换算为 GSB。</p>
             </CardContent>
           </Card>
         </div>
@@ -180,6 +182,7 @@ export default function QuestionnaireAnalytics() {
         </div>
 
         {filterPanel}
+        <NumericScoringSummary {...data} />
 
         {/* GSB 净胜分图 */}
         <Card>

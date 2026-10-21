@@ -452,6 +452,20 @@ export async function createAnswers(answerList: (typeof answers.$inferInsert)[])
   return db.insert(answers).values(answerList);
 }
 
+export async function savePublicAnswerSnapshot(responseId: number, visitorToken: string | undefined, answerList: (typeof answers.$inferInsert)[], submit: boolean) {
+  const database = await getDb();
+  if (!database) throw new Error("Database not available");
+  return database.transaction(async transaction => {
+    const [response] = await transaction.select().from(responses).where(eq(responses.id, responseId)).for("update");
+    if (!response || (response.visitorToken && response.visitorToken !== visitorToken)) throw new TRPCError({ code: "FORBIDDEN" });
+    if (response.subQuestionnaireIndex != null || response.status !== "in_progress") throw new TRPCError({ code: "BAD_REQUEST", message: "答卷已提交或需要通过子问卷保存流程" });
+    await transaction.delete(answers).where(eq(answers.responseId, responseId));
+    if (answerList.length) await transaction.insert(answers).values(answerList.map(answer => ({ ...answer, responseId })));
+    if (submit) await transaction.update(responses).set({ status: "submitted", submittedAt: new Date() }).where(eq(responses.id, responseId));
+    return { success: true, saved: answerList.length };
+  });
+}
+
 export async function getAnswersByResponse(responseId: number) {
   const db = await getDb();
   if (!db) return [];
@@ -516,7 +530,18 @@ export async function createEvaluationDimension(dimension: InsertEvaluationDimen
   const db = await getDb();
   if (!db) throw new Error("Database not available");
   
-  return db.insert(evaluationDimensions).values(dimension);
+  return withDimensionEdit(dimension.questionnaireId, transaction => transaction.insert(evaluationDimensions).values(dimension));
+}
+
+async function withDimensionEdit<Result>(questionnaireId: number, action: (transaction: Parameters<Parameters<NonNullable<Awaited<ReturnType<typeof getDb>>>["transaction"]>[0]>[0]) => Promise<Result>) {
+  const database = await getDb();
+  if (!database) throw new Error("Database not available");
+  return database.transaction(async transaction => {
+    const [questionnaire] = await transaction.select().from(questionnaires).where(eq(questionnaires.id, questionnaireId)).for("update");
+    const [response] = await transaction.select({ id: responses.id }).from(responses).where(eq(responses.questionnaireId, questionnaireId)).limit(1);
+    if (!questionnaire || questionnaire.status === "published" || response) throw new TRPCError({ code: "BAD_REQUEST", message: "已发布或已有答卷的问卷不能修改评分维度，请先取消发布；已有答卷请复制问卷" });
+    return action(transaction);
+  });
 }
 
 export async function createEvaluationDimensions(dimensions: InsertEvaluationDimension[]) {
@@ -524,7 +549,9 @@ export async function createEvaluationDimensions(dimensions: InsertEvaluationDim
   if (!db) throw new Error("Database not available");
   if (dimensions.length === 0) return;
 
-  return db.insert(evaluationDimensions).values(dimensions);
+  const questionnaireId = dimensions[0].questionnaireId;
+  if (dimensions.some(dimension => dimension.questionnaireId !== questionnaireId)) throw new Error("评分维度必须属于同一问卷");
+  return withDimensionEdit(questionnaireId, transaction => transaction.insert(evaluationDimensions).values(dimensions));
 }
 
 export async function getEvaluationDimensionsByQuestionnaire(questionnaireId: number) {
@@ -550,25 +577,30 @@ export async function updateEvaluationDimension(id: number, updates: Partial<Ins
   const db = await getDb();
   if (!db) throw new Error("Database not available");
   
-  return db.update(evaluationDimensions)
+  const dimension = await getEvaluationDimensionById(id);
+  if (!dimension) throw new TRPCError({ code: "NOT_FOUND" });
+  if (updates.questionnaireId !== undefined && updates.questionnaireId !== dimension.questionnaireId) throw new TRPCError({ code: "BAD_REQUEST" });
+  return withDimensionEdit(dimension.questionnaireId, transaction => transaction.update(evaluationDimensions)
     .set(updates)
-    .where(eq(evaluationDimensions.id, id));
+    .where(eq(evaluationDimensions.id, id)));
 }
 
 export async function deleteEvaluationDimension(id: number) {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
   
-  return db.delete(evaluationDimensions)
-    .where(eq(evaluationDimensions.id, id));
+  const dimension = await getEvaluationDimensionById(id);
+  if (!dimension) throw new TRPCError({ code: "NOT_FOUND" });
+  return withDimensionEdit(dimension.questionnaireId, transaction => transaction.delete(evaluationDimensions)
+    .where(eq(evaluationDimensions.id, id)));
 }
 
 // 删除某问卷的全部评分维度(改评分标准重新解析维度前调用)。
 export async function deleteEvaluationDimensionsByQuestionnaire(questionnaireId: number) {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
-  return db.delete(evaluationDimensions)
-    .where(eq(evaluationDimensions.questionnaireId, questionnaireId));
+  return withDimensionEdit(questionnaireId, transaction => transaction.delete(evaluationDimensions)
+    .where(eq(evaluationDimensions.questionnaireId, questionnaireId)));
 }
 
 /**

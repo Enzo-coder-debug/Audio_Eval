@@ -65,6 +65,7 @@ export default function MultiQuestionnaireAnalytics() {
           <div>
             <h1 className="text-3xl font-bold text-slate-900">跨问卷聚合分析</h1>
             <p className="text-slate-600 mt-2">选中多个问卷进行合并统计（按模型对比 × 维度名跨问卷聚合）</p>
+            <p className="mt-2 text-sm text-slate-500">此页仅聚合 GSB。量化评分与文本反馈请进入各问卷的「查看分析」，不同量表不混合统计。</p>
           </div>
           <Button variant="ghost" size="sm" onClick={() => setLocation("/admin/dashboard")}>
             <ArrowLeft className="w-4 h-4 mr-2" />

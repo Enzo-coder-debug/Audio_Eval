@@ -2,6 +2,8 @@ import { useState, useRef, useEffect, useMemo } from "react";
 import { useParams } from "wouter";
 import { trpc } from "@/lib/trpc";
 import { getEmotionCategories, isDimensionApplicable } from "@shared/evaluationDimensions";
+import { getScoringConfig, isScoringAnswerComplete, type EvaluationAnswerValue, type AudioEvaluation } from "@shared/scoring";
+import { ScoringAnswerFields } from "@/components/ScoringAnswerFields";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
@@ -33,7 +35,7 @@ function getVisitorToken(): string {
 
 interface PairAnswer {
   blindTestPairId: number;
-  choices: Record<number, BlindTestChoice>; // dimensionId -> choice
+  choices: Record<number, EvaluationAnswerValue>;
 }
 
 // 断点续答:按 responseId 在 localStorage 记住当前 pair 指针,关闭浏览器后再回来能定位到上次位置
@@ -71,6 +73,7 @@ export default function PublicQuestionnaire() {
     blindTestPairId: number | null;
     evaluationDimensionId: number | null;
     blindTestChoice: string | null;
+    audioEvaluation?: AudioEvaluation | null;
   }> | null>(null);
   // 断点续答需要"数据加载完成后再跳转"到 savedIdx,避免 questionnaire 还没到就被裁剪掉
   const [pendingResumeIndex, setPendingResumeIndex] = useState<number | null>(null);
@@ -131,13 +134,16 @@ export default function PublicQuestionnaire() {
 
   // 中途保存作答进度(节流触发,与最终提交共享 answers 表的 upsert 快照语义)
   const saveProgressMutation = trpc.response.saveProgressPublic.useMutation({
-    // 静默保存,失败不打扰用户(下一次操作会自动重试)
-    onError: () => { /* ignore */ },
+    scope: { id: "public-questionnaire-autosave" },
+    onSuccess: () => { toast.dismiss("autosave-failed"); },
+    onError: () => { if (!isSubmitting && !isCompleted) toast.error("自动保存失败，请保持页面打开并重试；提交成功前不要关闭页面。", { id: "autosave-failed" }); },
   });
 
   // Submit mutation
   const submitMutation = trpc.response.submitPublic.useMutation({
+    scope: { id: "public-questionnaire-autosave" },
     onSuccess: () => {
+      toast.dismiss("autosave-failed");
       setIsCompleted(true);
       setIsSubmitting(false);
       if (responseId) clearPairIndex(responseId);
@@ -160,14 +166,14 @@ export default function PublicQuestionnaire() {
     setPairAnswers((prev) => {
       const prevById = new Map(prev.map((p) => [p.blindTestPairId, p]));
       // 服务端快照按 (pairId, dimId) 聚合成 choices
-      const snapshotById = new Map<number, Record<number, BlindTestChoice>>();
+      const snapshotById = new Map<number, Record<number, EvaluationAnswerValue>>();
       if (savedAnswersSnapshot && savedAnswersSnapshot.length > 0) {
         for (const a of savedAnswersSnapshot) {
-          if (a.blindTestPairId == null || a.evaluationDimensionId == null || !a.blindTestChoice) continue;
+          if (a.blindTestPairId == null || a.evaluationDimensionId == null) continue;
           const ch = a.blindTestChoice as BlindTestChoice;
-          if (ch !== "left_better" && ch !== "same" && ch !== "right_better") continue;
+          if (!a.audioEvaluation && ch !== "left_better" && ch !== "same" && ch !== "right_better") continue;
           const bucket = snapshotById.get(a.blindTestPairId) ?? {};
-          bucket[a.evaluationDimensionId] = ch;
+          bucket[a.evaluationDimensionId] = a.audioEvaluation ? { audioEvaluation: a.audioEvaluation } : { blindTestChoice: ch };
           snapshotById.set(a.blindTestPairId, bucket);
         }
       }
@@ -192,7 +198,7 @@ export default function PublicQuestionnaire() {
     }
     // 用 pair id 序列作为依赖签名,避免对象引用变化触发重置
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visiblePairs.map((p: any) => p.id).join(",")]);
+  }, [visiblePairs.map((p: any) => p.id).join(","), savedAnswersSnapshot, pendingResumeIndex]);
 
   // Audio player handlers
   const toggleLeftAudio = () => {
@@ -305,7 +311,8 @@ export default function PublicQuestionnaire() {
         .map(([dimId, choice]) => ({
           evaluationDimensionId: Number(dimId),
           blindTestPairId: pa.blindTestPairId,
-          blindTestChoice: choice as "left_better" | "same" | "right_better",
+          blindTestChoice: choice.blindTestChoice ?? undefined,
+          audioEvaluation: choice.audioEvaluation ?? undefined,
         }));
     });
     // 空作答(初始加载或全被清空)不必去服务端 delete,避免不必要请求
@@ -319,7 +326,7 @@ export default function PublicQuestionnaire() {
   }, [pairAnswers, hasStarted, responseId, isCompleted, isSubmitting, questionnaire?.dimensions, visiblePairs]);
 
   // Handle choice selection
-  const handleChoice = (dimensionId: number, choice: BlindTestChoice) => {
+  const handleChoice = (dimensionId: number, choice: EvaluationAnswerValue) => {
     setPairAnswers(prev => {
       const updated = [...prev];
       if (updated[currentPairIndex]) {
@@ -347,7 +354,7 @@ export default function PublicQuestionnaire() {
       return isDimensionApplicable(d, groupLabel);
     });
     if (dimsForPair.length === 0) return true;
-    return dimsForPair.every((dim: any) => currentAnswer.choices[dim.id] !== undefined);
+    return dimsForPair.every((dim: any) => isScoringAnswerComplete(dim, currentAnswer.choices[dim.id]));
   };
 
   // Handle next pair
@@ -393,7 +400,7 @@ export default function PublicQuestionnaire() {
     if (dims.length > 0 && total > 0) {
       const firstIncomplete = pairAnswers.findIndex((pa, idx) => {
         const required = dimsForPair(pairs[idx]);
-        return !required.every((dim: any) => pa.choices[dim.id] !== undefined);
+        return !required.every((dim: any) => isScoringAnswerComplete(dim, pa.choices[dim.id]));
       });
       // pairAnswers 数量与组数不一致(异常),或存在未答满的组,都视为未完成
       if (pairAnswers.length !== total || firstIncomplete !== -1) {
@@ -415,7 +422,8 @@ export default function PublicQuestionnaire() {
         .map(([dimId, choice]) => ({
           evaluationDimensionId: Number(dimId),
           blindTestPairId: pa.blindTestPairId,
-          blindTestChoice: choice as "left_better" | "same" | "right_better",
+          blindTestChoice: choice.blindTestChoice ?? undefined,
+          audioEvaluation: choice.audioEvaluation ?? undefined,
         }));
     });
 
@@ -700,7 +708,6 @@ export default function PublicQuestionnaire() {
         {/* Evaluation Dimensions */}
         <div className="space-y-3">
           {dimensionsForCurrentPair.map((dim: any) => {
-            const currentChoice = currentAnswer?.choices[dim.id];
             const isSimilarity = dim.dimensionType === "similarity";
             const isEmotionAccuracy = dim.dimensionType === "emotion_accuracy";
             const groupLabel = (currentPair.groupLabel || "").trim();
@@ -726,46 +733,15 @@ export default function PublicQuestionnaire() {
                       </h4>
                       {isEmotionAccuracy && targetEmotion && (
                         <p className="mt-2 text-sm font-medium text-blue-700">
-                          目标情绪：{targetEmotion}。请选择更准确表达该情绪的音频。
+                          目标情绪：{targetEmotion}。{getScoringConfig(dim).mode === "numeric" ? "请分别评价两个音频的情绪准确度。" : "请选择更准确表达该情绪的音频。"}
                         </p>
                       )}
                       {dim.description && (
                         <p className="text-sm text-gray-500 mt-1 leading-relaxed">{dim.description}</p>
                       )}
                     </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                      <button
-                        onClick={() => handleChoice(dim.id, "left_better")}
-                        className={`px-4 py-2 text-sm font-medium rounded-full border-2 transition-all duration-150 cursor-pointer ${
-                          currentChoice === "left_better"
-                            ? "bg-orange-50 border-orange-400 text-orange-700 shadow-sm"
-                            : "border-orange-200 text-orange-600 hover:bg-orange-50 hover:border-orange-300"
-                        }`}
-                      >
-                    左边更好
-                      </button>
-                      <button
-                        onClick={() => handleChoice(dim.id, "same")}
-                        className={`px-4 py-2 text-sm font-medium rounded-full border-2 transition-all duration-150 cursor-pointer ${
-                          currentChoice === "same"
-                            ? "bg-yellow-50 border-yellow-400 text-yellow-700 shadow-sm"
-                            : "border-yellow-200 text-yellow-600 hover:bg-yellow-50 hover:border-yellow-300"
-                        }`}
-                      >
-                        差不多
-                      </button>
-                      <button
-                        onClick={() => handleChoice(dim.id, "right_better")}
-                        className={`px-4 py-2 text-sm font-medium rounded-full border-2 transition-all duration-150 cursor-pointer ${
-                          currentChoice === "right_better"
-                            ? "bg-green-50 border-green-400 text-green-700 shadow-sm"
-                            : "border-green-200 text-green-600 hover:bg-green-50 hover:border-green-300"
-                        }`}
-                      >
-                        右边更好
-                      </button>
-                    </div>
                   </div>
+                  <ScoringAnswerFields dimension={dim} value={currentAnswer?.choices[dim.id]} onChange={value => handleChoice(dim.id, value)} disabled={isSubmitting} />
                   {/* 相似度维度：附参考音频播放器（对比左右两边与参考音频的相似度） */}
                   {isSimilarity && dim.referenceAudio?.fileUrl && (
                     <div className="rounded-md border border-purple-200 bg-white p-3">

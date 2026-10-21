@@ -10,6 +10,9 @@ import * as db from "./db";
 import { TRPCError } from "@trpc/server";
 import { deriveGroupLabel } from "@shared/audioGroupLabels";
 import { readSubQuestionnairePlan } from "@shared/subQuestionnaires";
+import { evaluationAnswerSchema, getScoringConfig, scoringConfigSchema } from "@shared/scoring";
+import { validatePublicEvaluationAnswers } from "./evaluationAnswers";
+import { aggregateAudioEvaluations } from "@shared/scoringAnalytics";
 import { allocateSubQuestionnaire, assertNoSubQuestionnairePlan, configureSubQuestionnaires, getAssignedSubQuestionnaire, getSubQuestionnaireDistribution, saveSubQuestionnaireAnswers } from "./subQuestionnaires";
 
 const uploadedAudioSchema = z.object({
@@ -979,6 +982,7 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
                 referenceAudioFileId: refNewId,
                 targetGroupLabels: d.dimensionType === "similarity" ? d.targetGroupLabels : null,
                 emotionCategories: d.dimensionType === "emotion_accuracy" ? d.emotionCategories : null,
+                scoringConfig: d.scoringConfig,
               };
             })
           );
@@ -1013,7 +1017,8 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
         weight: z.number().default(1),
         maxScore: z.number().default(10),
         orderIndex: z.number(),
-        dimensionType: z.enum(["normal", "similarity", "emotion_accuracy"]).default("normal"),
+        dimensionType: z.enum(["normal", "similarity", "emotion_accuracy", "other"]).default("normal"),
+        scoringConfig: scoringConfigSchema.optional(),
         referenceAudioFileId: z.number().int().positive().nullable().optional(),
         targetGroupLabels: z.array(z.string().trim().min(1)).optional(),
         emotionCategories: emotionCategoriesSchema.optional(),
@@ -1021,6 +1026,8 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
       .mutation(async ({ input, ctx }) => {
         const questionnaire = await db.getQuestionnaireById(input.questionnaireId);
         if (!questionnaire || questionnaire.creatorId !== ctx.user.id) throw new TRPCError({ code: "FORBIDDEN" });
+        const scoringConfig = input.scoringConfig ?? { mode: "gsb" as const };
+        if ((input.dimensionType === "other") !== (scoringConfig.mode === "text")) throw new TRPCError({ code: "BAD_REQUEST", message: "「其他」维度须使用文本作答；其余维度请选择 GSB 或量化打分" });
         let referenceAudioFileId: number | null = null;
         let targetGroupLabels: string | null = null;
         if (input.dimensionType === "similarity") {
@@ -1038,7 +1045,7 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
         }
         const emotionCategories = input.dimensionType === "emotion_accuracy" ? input.emotionCategories ?? [] : null;
         if (emotionCategories) await validateEmotionCategories(input.questionnaireId, emotionCategories);
-        const result = await db.createEvaluationDimension({ questionnaireId: input.questionnaireId, dimensionName: input.dimensionName, description: input.description || null, weight: String(input.weight) as any, maxScore: String(input.maxScore) as any, orderIndex: input.orderIndex, dimensionType: input.dimensionType, referenceAudioFileId, targetGroupLabels, emotionCategories });
+        const result = await db.createEvaluationDimension({ questionnaireId: input.questionnaireId, dimensionName: input.dimensionName, description: input.description || null, weight: String(input.weight) as any, maxScore: String(scoringConfig.mode === "numeric" ? scoringConfig.max : input.maxScore), orderIndex: input.orderIndex, dimensionType: input.dimensionType, referenceAudioFileId, targetGroupLabels, emotionCategories, scoringConfig });
         return { success: true, dimensionId: getInsertId(result) };
       }),
 
@@ -1095,12 +1102,14 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
       }),
 
     update: adminProcedure
-      .input(z.object({ id: z.number(), dimensionName: z.string().trim().min(1).optional(), description: z.string().optional(), weight: z.number().optional(), maxScore: z.number().optional(), orderIndex: z.number().optional(), dimensionType: z.enum(["normal", "similarity", "emotion_accuracy"]).optional(), referenceAudioFileId: z.number().int().positive().nullable().optional(), targetGroupLabels: z.array(z.string().trim().min(1)).optional(), emotionCategories: emotionCategoriesSchema.optional() }))
+      .input(z.object({ id: z.number(), dimensionName: z.string().trim().min(1).optional(), description: z.string().optional(), weight: z.number().optional(), maxScore: z.number().optional(), orderIndex: z.number().optional(), dimensionType: z.enum(["normal", "similarity", "emotion_accuracy", "other"]).optional(), scoringConfig: scoringConfigSchema.optional(), referenceAudioFileId: z.number().int().positive().nullable().optional(), targetGroupLabels: z.array(z.string().trim().min(1)).optional(), emotionCategories: emotionCategoriesSchema.optional() }))
       .mutation(async ({ input, ctx }) => {
         const dimension = await db.getEvaluationDimensionById(input.id);
         const questionnaire = dimension && await db.getQuestionnaireById(dimension.questionnaireId);
         if (!dimension || !questionnaire || questionnaire.creatorId !== ctx.user.id) throw new TRPCError({ code: "FORBIDDEN" });
         const type = input.dimensionType ?? dimension.dimensionType;
+        const scoringConfig = input.scoringConfig ?? getScoringConfig(dimension);
+        if ((type === "other") !== (scoringConfig.mode === "text")) throw new TRPCError({ code: "BAD_REQUEST", message: "「其他」维度须使用文本作答；其余维度请选择 GSB 或量化打分" });
         const referenceId = input.referenceAudioFileId === undefined ? dimension.referenceAudioFileId : input.referenceAudioFileId;
         let labels: string[] = [];
         try { labels = JSON.parse(dimension.targetGroupLabels || "[]"); } catch { labels = []; }
@@ -1118,6 +1127,8 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
         const updates: any = { ...fields, dimensionType: type, referenceAudioFileId: type === "similarity" ? referenceId : null, targetGroupLabels: type === "similarity" ? JSON.stringify(labels) : null, emotionCategories };
         if (input.weight !== undefined) updates.weight = String(input.weight);
         if (input.maxScore !== undefined) updates.maxScore = String(input.maxScore);
+        updates.scoringConfig = scoringConfig;
+        if (scoringConfig.mode === "numeric") updates.maxScore = String(scoringConfig.max);
         await db.updateEvaluationDimension(id, updates);
         return { success: true };
       }),
@@ -1165,7 +1176,7 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
         if (questionnaire.subQuestionnairePlan != null) {
           const assignment = await allocateSubQuestionnaire({ questionnaireId: input.questionnaireId, visitorName, visitorToken, visitorIp });
           const savedAnswers = assignment.resumed ? await db.getAnswersByResponse(assignment.responseId) : [];
-          return { responseId: assignment.responseId, subQuestionnaireIndex: assignment.form.index, sampledGroupLabels: assignment.form.groupLabels, savedAnswers: savedAnswers.map(answer => ({ blindTestPairId: answer.blindTestPairId, evaluationDimensionId: answer.evaluationDimensionId, blindTestChoice: answer.blindTestChoice })) };
+          return { responseId: assignment.responseId, subQuestionnaireIndex: assignment.form.index, sampledGroupLabels: assignment.form.groupLabels, savedAnswers: savedAnswers.map(answer => ({ blindTestPairId: answer.blindTestPairId, evaluationDimensionId: answer.evaluationDimensionId, blindTestChoice: answer.blindTestChoice, audioEvaluation: answer.audioEvaluation })) };
         }
 
         // 复用同问卷、同 IP、同姓名未提交的 in_progress 记录,避免同一个人每次进入都新建脏数据。
@@ -1173,6 +1184,7 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
         if (visitorIp && visitorName) {
           const existing = await db.findInProgressResponse(input.questionnaireId, visitorIp, visitorName);
           if (existing) {
+            if (existing.visitorToken && existing.visitorToken !== visitorToken) throw new TRPCError({ code: "FORBIDDEN", message: "此姓名已有进行中的答卷，请使用原浏览器继续作答" });
             // 同时把该记录已保存的 answers 快照返回,供前端水合"中途退出前的作答进度"
             const savedAnswers = await db.getAnswersByResponse(existing.id);
             return {
@@ -1183,6 +1195,7 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
                 blindTestPairId: a.blindTestPairId,
                 evaluationDimensionId: a.evaluationDimensionId,
                 blindTestChoice: a.blindTestChoice,
+                audioEvaluation: a.audioEvaluation,
               })),
             };
           }
@@ -1277,146 +1290,26 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
      * 前端断点续答:关闭浏览器 → 再回来 → startPublic 拿到 savedAnswers 水合即可。
      */
     saveProgressPublic: publicProcedure
-      .input(z.object({
-        responseId: z.number(),
-        visitorToken: z.string().max(64).optional(),
-        answers: z.array(z.object({
-          questionId: z.number().optional(),
-          evaluationDimensionId: z.number().optional(),
-          blindTestPairId: z.number().optional(),
-          answerContent: z.string().optional(),
-          blindTestChoice: z.enum(["left_better", "same", "right_better"]).optional(),
-        })),
-      }))
+      .input(z.object({ responseId: z.number(), visitorToken: z.string().max(64).optional(), answers: z.array(evaluationAnswerSchema) }))
       .mutation(async ({ input }) => {
         const response = await db.getResponseById(input.responseId);
-        if (!response) {
-          throw new TRPCError({ code: "NOT_FOUND" });
-        }
+        if (!response) throw new TRPCError({ code: "NOT_FOUND" });
         if (response.subQuestionnaireIndex != null) return saveSubQuestionnaireAnswers(input, false);
-        // 已提交的答卷不允许再改
-        if (response.status === "submitted") {
-          throw new TRPCError({ code: "BAD_REQUEST", message: "答卷已提交,无法再修改" });
-        }
-
-        const answersList = input.answers.map(a => ({
-          responseId: input.responseId,
-          questionId: a.questionId || null,
-          evaluationDimensionId: a.evaluationDimensionId || null,
-          blindTestPairId: a.blindTestPairId || null,
-          answerContent: a.answerContent || null,
-          blindTestChoice: a.blindTestChoice || null,
-        }));
-
-        await db.deleteAnswersByResponse(input.responseId);
-        if (answersList.length > 0) {
-          await db.createAnswers(answersList);
-        }
-
-        return { success: true, saved: answersList.length };
+        await validatePublicEvaluationAnswers(response, input.answers, false);
+        return db.savePublicAnswerSnapshot(input.responseId, input.visitorToken, input.answers.map(answer => ({ ...answer, responseId: input.responseId })), false);
       }),
 
-    /**
-     * Submit answers (public - anonymous)
-     */
     submitPublic: publicProcedure
-      .input(z.object({
-        responseId: z.number(),
-        visitorToken: z.string().max(64).optional(),
-        answers: z.array(z.object({
-          questionId: z.number().optional(),
-          evaluationDimensionId: z.number().optional(),
-          blindTestPairId: z.number().optional(),
-          answerContent: z.string().optional(),
-          blindTestChoice: z.enum(["left_better", "same", "right_better"]).optional(),
-        })),
-      }))
+      .input(z.object({ responseId: z.number(), visitorToken: z.string().max(64).optional(), answers: z.array(evaluationAnswerSchema) }))
       .mutation(async ({ input }) => {
         const response = await db.getResponseById(input.responseId);
-        if (!response) {
-          throw new TRPCError({ code: "NOT_FOUND" });
-        }
-
+        if (!response) throw new TRPCError({ code: "NOT_FOUND" });
         if (response.subQuestionnaireIndex != null) return saveSubQuestionnaireAnswers(input, true);
-        // 服务端全量校验:盲测问卷必须覆盖全部 pairs × 全部 dimensions,
-        // 防止前端漏组/异常客户端导致残缺样本入库(判断次数不足)。
-        if (response.questionnaireId) {
-          const [pairs, dims] = await Promise.all([
-            db.getBlindTestPairsByQuestionnaire(response.questionnaireId),
-            db.getEvaluationDimensionsByQuestionnaire(response.questionnaireId),
-          ]);
-          // 抽样发放:若本问卷锚定了抽样子集(sampledGroupLabels),校验范围缩到抽中组内的 pairs。
-          // 未抽样(null)则保持全量校验,不影响存量问卷。
-          const sampled = parseSampledGroupLabels(response.sampledGroupLabels);
-          // 为每条盲测 pair 解析其组别(groupLabel),供抽样过滤与特殊维度按组限定共用。
-          const pairsWithLabel = await Promise.all(
-            pairs.map(async (p) => {
-              const leftAudio = await db.getAudioFileById(p.leftAudioFileId);
-              const rightAudio = await db.getAudioFileById(p.rightAudioFileId);
-              return { pair: p, label: (leftAudio?.groupLabel || rightAudio?.groupLabel || "").trim() };
-            }),
-          );
-          let scopedPairs = pairsWithLabel;
-          if (sampled) {
-            const sampledSet = new Set(sampled);
-            scopedPairs = pairsWithLabel.filter(({ label }) => label && sampledSet.has(label));
-          }
-          if (scopedPairs.length > 0 && dims.length > 0) {
-            const submitted = new Set(
-              input.answers
-                .filter(a => a?.blindTestPairId != null && a?.evaluationDimensionId != null && a?.blindTestChoice != null)
-                .map(a => `${a.blindTestPairId}:${a.evaluationDimensionId}`),
-            );
-            // 逐条盲测按"适用维度"校验,与前端 filterDimensionsForPair 口径一致:
-            // - 普通维度:所有题目都必答;
-            // - 特殊维度:仅在目标组别或情绪类别配置命中的题目上必答,否则跳过。
-            const missing = scopedPairs.some(({ pair, label }) =>
-              dims.some((d) => {
-                if (!isDimensionApplicable(d, label)) return false;
-                return !submitted.has(`${pair.id}:${d.id}`);
-              }),
-            );
-            if (missing) {
-              throw new TRPCError({
-                code: "BAD_REQUEST",
-                message: `答卷不完整:需完成全部 ${scopedPairs.length} 组的所有适用维度评分后才能提交`,
-              });
-            }
-          }
-        }
-
-        // Create answer records
-        const answersList = input.answers.map(a => ({
-          responseId: input.responseId,
-          questionId: a.questionId || null,
-          evaluationDimensionId: a.evaluationDimensionId || null,
-          blindTestPairId: a.blindTestPairId || null,
-          answerContent: a.answerContent || null,
-          blindTestChoice: a.blindTestChoice || null,
-        }));
-
-        // 先清空该 response 之前"中途保存"过的 answers 快照,再统一插入本次提交内容,
-        // 确保 answers 表对同一 (responseId, blindTestPairId, evaluationDimensionId) 只保留一份最终作答。
-        await db.deleteAnswersByResponse(input.responseId);
-        await db.createAnswers(answersList);
-
-        // Update response status
-        await db.updateResponse(input.responseId, {
-          status: "submitted",
-          submittedAt: new Date(),
-        });
-
-        // 清理同问卷、同 IP、同姓名的其他残留 in_progress 记录(避免"填写进展/答卷详情"出现脏数据)。
-        // 按 IP+姓名而非 token:避免误删同一 IP 下其他访客(不同姓名)正在进行的答卷。
+        await validatePublicEvaluationAnswers(response, input.answers, true);
+        await db.savePublicAnswerSnapshot(input.responseId, input.visitorToken, input.answers.map(answer => ({ ...answer, responseId: input.responseId })), true);
         if (response.visitorIp && response.visitorName && response.questionnaireId) {
-          await db.deleteStaleInProgressResponses(
-            response.questionnaireId,
-            response.visitorIp,
-            response.visitorName,
-            input.responseId,
-          );
+          await db.deleteStaleInProgressResponses(response.questionnaireId, response.visitorIp, response.visitorName, input.responseId);
         }
-
         return { success: true };
       }),
 
@@ -1510,6 +1403,9 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
             return {
               id: pair.id,
               pairIndex: pair.pairIndex,
+              groupLabel: leftAudio?.groupLabel || rightAudio?.groupLabel || "",
+              leftAudioFileId: pair.leftAudioFileId,
+              rightAudioFileId: pair.rightAudioFileId,
               leftModelName: leftAudio?.modelName || "左侧模型",
               rightModelName: rightAudio?.modelName || "右侧模型",
               leftFileName: leftAudio?.fileName || null,
@@ -1600,7 +1496,7 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
           id: r.id,
           visitorName: r.visitorName || "匿名",
           submittedAt: r.submittedAt,
-          judgmentCount: (answersByResponse.get(r.id) || []).filter((a: any) => a.blindTestChoice).length,
+          judgmentCount: (answersByResponse.get(r.id) || []).filter((a: any) => a.blindTestChoice || a.audioEvaluation).length,
         }));
 
         // 选中集合:未传或空数组 => 全选(纳入全部)。否则只纳入选中的答卷。
@@ -1688,6 +1584,7 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
         return {
           totalResponses: includedResponseCount,
           totalJudgments: allAnswers.filter(a => a.blindTestChoice).length,
+          ...aggregateAudioEvaluations(dimensions, pairMeta, allAnswers),
           comparisons,
           responseSamples,
         };

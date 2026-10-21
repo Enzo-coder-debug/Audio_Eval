@@ -5,6 +5,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { GroupLabelPicker } from "@/components/GroupLabelPicker";
 import { SubQuestionnaireDistribution } from "@/components/SubQuestionnaireDistribution";
+import { ScoringConfigEditor, ScoringConfigSummary } from "@/components/ScoringConfigEditor";
+import { formatAudioEvaluation, getScoringConfig, scoringConfigSchema, type ScoringConfig } from "@shared/scoring";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -54,7 +56,8 @@ export default function AdminQuestionnaireDetail() {
   const [dimensionWeight, setDimensionWeight] = useState("1");
   const [dimensionMaxScore, setDimensionMaxScore] = useState("10");
   // 特殊维度：音色相似度
-  const [dimensionType, setDimensionType] = useState<"normal" | "similarity" | "emotion_accuracy">("normal");
+  const [dimensionType, setDimensionType] = useState<"normal" | "similarity" | "emotion_accuracy" | "other">("normal");
+  const [scoringConfig, setScoringConfig] = useState<ScoringConfig>({ mode: "gsb" });
   const [referenceAudioFileId, setReferenceAudioFileId] = useState<number | null>(null);
   // 参考音频当前显示的文件名(独立上传流程,仅用于回显,不用于业务逻辑)
   const [referenceAudioFileName, setReferenceAudioFileName] = useState<string>("");
@@ -324,6 +327,7 @@ export default function AdminQuestionnaireDetail() {
   };
 
   const resetDimensionForm = () => {
+    setScoringConfig({ mode: "gsb" });
     setDimensionName("");
     setDimensionDescription("");
     setDimensionWeight("1");
@@ -338,6 +342,11 @@ export default function AdminQuestionnaireDetail() {
   };
 
   const handleSaveDimension = () => {
+    const parsedScoring = scoringConfigSchema.safeParse(scoringConfig);
+    if (!parsedScoring.success) {
+      toast.error(parsedScoring.error.issues[0].message);
+      return;
+    }
     if (!dimensionName.trim()) {
       toast.error("请输入维度名称");
       return;
@@ -381,6 +390,7 @@ export default function AdminQuestionnaireDetail() {
       referenceAudioFileId: dimensionType === "similarity" ? referenceAudioFileId : null,
       targetGroupLabels: dimensionType === "similarity" ? targetGroupLabels : [],
       emotionCategories: dimensionType === "emotion_accuracy" ? categories : undefined,
+      scoringConfig: parsedScoring.data,
     };
 
     if (editingDimensionId) {
@@ -395,12 +405,13 @@ export default function AdminQuestionnaireDetail() {
   };
 
   const handleEditDimension = (dimension: any) => {
+    setScoringConfig(getScoringConfig(dimension));
     setEditingDimensionId(dimension.id);
     setDimensionName(dimension.dimensionName);
     setDimensionDescription(dimension.description || "");
     setDimensionWeight(String(dimension.weight));
     setDimensionMaxScore(String(dimension.maxScore));
-    setDimensionType((dimension.dimensionType as "normal" | "similarity" | "emotion_accuracy") || "normal");
+    setDimensionType((dimension.dimensionType as "normal" | "similarity" | "emotion_accuracy" | "other") || "normal");
     setReferenceAudioFileId(dimension.referenceAudioFileId ?? null);
     // 参考音频文件名回显:优先从 dimension 关联对象取,否则查 questionnaireAudios(含参考音频)。
     // 由于 questionnaireAudios 默认过滤参考音频,这里通过 fileName 兜底为空;编辑时如已选参考音频将显示 ID 占位。
@@ -716,16 +727,39 @@ export default function AdminQuestionnaireDetail() {
             维度: a.evaluationDimensionId
               ? dimensionNameMap.get(a.evaluationDimensionId) || `维度#${a.evaluationDimensionId}`
               : "评价",
-            选择结果: verdictLabel(pair, a.blindTestChoice),
+            选择结果: formatAudioEvaluation(a.audioEvaluation) || verdictLabel(pair, a.blindTestChoice),
+            组别: pair?.groupLabel || "",
+            配对ID: group.pairId,
+            维度ID: a.evaluationDimensionId ?? "",
+            音频A文件名: pair?.leftFileName || "",
+            音频AID: pair?.leftAudioFileId ?? "",
+            音频A模型: pair?.leftModelName || "",
+            音频A分值: a.audioEvaluation?.leftScore ?? "",
+            音频A观察: a.audioEvaluation?.leftText ?? "",
+            音频B文件名: pair?.rightFileName || "",
+            音频BID: pair?.rightAudioFileId ?? "",
+            音频B模型: pair?.rightModelName || "",
+            音频B分值: a.audioEvaluation?.rightScore ?? "",
+            音频B观察: a.audioEvaluation?.rightText ?? "",
           });
         }
       }
 
       const ws = XLSX.utils.json_to_sheet(rows, { header: ["配对", "维度", "选择结果"] });
-      ws["!cols"] = [{ wch: 60 }, { wch: 20 }, { wch: 24 }];
+      ws["!cols"] = Array.from({ length: 17 }, (_, index) => ({ wch: index === 0 || index === 2 ? 60 : 24 }));
       XLSX.utils.book_append_sheet(wb, ws, safeSheetName(response.visitorName, idx));
     });
 
+    const ruleRows = (dimensions || []).flatMap(dimension => {
+      const config = getScoringConfig(dimension);
+      const base = { 维度ID: dimension.id, 维度: dimension.dimensionName, 方法: config.mode };
+      return config.mode === "numeric"
+        ? config.rules.map(rule => ({ ...base, 分值: rule.score as number | string, 判定规则: rule.description }))
+        : [{ ...base, 分值: "", 判定规则: config.mode === "text" ? `${config.required ? "必填" : "选填"}：${config.prompt}` : "左边更好 / 差不多 / 右边更好" }];
+    });
+    const rulesSheet = XLSX.utils.json_to_sheet(ruleRows);
+    rulesSheet["!cols"] = [{ wch: 12 }, { wch: 20 }, { wch: 12 }, { wch: 12 }, { wch: 80 }];
+    XLSX.utils.book_append_sheet(wb, rulesSheet, safeSheetName("评分规则", responses.length));
     const fileName = `${(questionnaire?.title || "答卷详情").replace(/[\\/?*[\]:]/g, "_")}.xlsx`;
     XLSX.writeFile(wb, fileName);
     toast.success(`已导出 ${responses.length} 份答卷`);
@@ -1023,6 +1057,7 @@ export default function AdminQuestionnaireDetail() {
                 <DialogTrigger asChild>
                   <Button
                     className="bg-blue-600 hover:bg-blue-700"
+                    disabled={questionnaire.status === "published" || (responses?.length ?? 0) > 0}
                     onClick={() => resetDimensionForm()}
                   >
                     <Plus className="w-4 h-4 mr-2" />
@@ -1034,7 +1069,7 @@ export default function AdminQuestionnaireDetail() {
                     <DialogTitle>
                       {editingDimensionId ? "编辑维度" : "添加新维度"}
                     </DialogTitle>
-                    <DialogDescription>特殊维度支持筛选组别和批量选择，保存后生效。</DialogDescription>
+                  <DialogDescription>支持 GSB、量化打分和「其他」开放文本；发布或产生答卷后，评分维度不可修改。</DialogDescription>
                   </DialogHeader>
 
                   <ScrollArea type="always" className="min-h-0 flex-1">
@@ -1058,28 +1093,6 @@ export default function AdminQuestionnaireDetail() {
                       />
                     </div>
 
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="space-y-2">
-                        <Label>权重</Label>
-                        <Input
-                          type="number"
-                          step="0.1"
-                          min="0"
-                          value={dimensionWeight}
-                          onChange={(e) => setDimensionWeight(e.target.value)}
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <Label>满分</Label>
-                        <Input
-                          type="number"
-                          step="0.1"
-                          min="0"
-                          value={dimensionMaxScore}
-                          onChange={(e) => setDimensionMaxScore(e.target.value)}
-                        />
-                      </div>
-                    </div>
 
                     {/* 维度类型：普通 / 音色相似度 / 情绪准确度，特殊维度按组别配置 */}
                     <div className="space-y-2">
@@ -1087,8 +1100,12 @@ export default function AdminQuestionnaireDetail() {
                       <Select
                         value={dimensionType}
                         onValueChange={(v) => {
-                          const next = v as "normal" | "similarity" | "emotion_accuracy";
+                          const next = v as "normal" | "similarity" | "emotion_accuracy" | "other";
                           setDimensionType(next);
+                          if (next === "other") {
+                            if (!dimensionName.trim()) setDimensionName("其他");
+                            setScoringConfig({ mode: "text", prompt: "请描述该音频的表现、异常片段或改进建议。", required: false });
+                          } else if (scoringConfig.mode === "text") setScoringConfig({ mode: "gsb" });
                           if (next === "emotion_accuracy") {
                             if (!dimensionName.trim()) setDimensionName("情绪准确度");
                             if (!dimensionDescription.trim()) setDimensionDescription("判断哪段音频更准确地表达指定的目标情绪。");
@@ -1108,10 +1125,12 @@ export default function AdminQuestionnaireDetail() {
                           <SelectItem value="normal">普通评分维度</SelectItem>
                           <SelectItem value="similarity">音色相似度（需参考音频+目标组别）</SelectItem>
                           <SelectItem value="emotion_accuracy">情绪准确度（情绪类别+音频组别）</SelectItem>
+                          <SelectItem value="other">其他（开放文本，用于自然语言分析）</SelectItem>
                         </SelectContent>
                       </Select>
                     </div>
 
+                    <ScoringConfigEditor value={scoringConfig} onChange={setScoringConfig} textOnly={dimensionType === "other"} />
                     {dimensionType === "emotion_accuracy" && (
                       <div className="space-y-3">
                         <Label>情绪类别与音频组别 *</Label>
@@ -1220,6 +1239,7 @@ export default function AdminQuestionnaireDetail() {
               </div>
             </div>
 
+            {(questionnaire.status === "published" || (responses?.length ?? 0) > 0) && <p className="text-sm text-amber-700">评分维度已锁定。无答卷时可取消发布后修改；已有答卷请复制问卷后配置新规则。</p>}
             {/* Dimensions List */}
             {!dimensions || dimensions.length === 0 ? (
               <Card>
@@ -1245,6 +1265,7 @@ export default function AdminQuestionnaireDetail() {
                         <div>
                           <CardTitle className="text-lg">
                             {dimension.dimensionName}
+                            <span className="ml-2 inline-block rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium">{getScoringConfig(dimension).mode === "numeric" ? "量化打分 · A/B 独立" : getScoringConfig(dimension).mode === "text" ? "开放文本" : "GSB"}</span>
                             {dimension.dimensionType === "emotion_accuracy" && (
                               <span className="ml-2 inline-block rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-700">情绪准确度</span>
                             )}
@@ -1266,6 +1287,7 @@ export default function AdminQuestionnaireDetail() {
                             variant="ghost"
                             aria-label={`编辑维度 ${dimension.dimensionName}`}
                             onClick={() => handleEditDimension(dimension)}
+                            disabled={questionnaire.status === "published" || (responses?.length ?? 0) > 0}
                           >
                             <Edit2 className="w-4 h-4" />
                           </Button>
@@ -1274,6 +1296,7 @@ export default function AdminQuestionnaireDetail() {
                             variant="ghost"
                             className="text-red-600 hover:text-red-700 hover:bg-red-50"
                             onClick={() => handleDeleteDimension(dimension.id)}
+                            disabled={questionnaire.status === "published" || (responses?.length ?? 0) > 0}
                           >
                             <Trash2 className="w-4 h-4" />
                           </Button>
@@ -1282,14 +1305,7 @@ export default function AdminQuestionnaireDetail() {
                     </CardHeader>
                     <CardContent>
                       <div className="flex flex-wrap gap-6 text-sm">
-                        <div>
-                          <span className="text-slate-600">权重：</span>
-                          <span className="font-medium">{dimension.weight}</span>
-                        </div>
-                        <div>
-                          <span className="text-slate-600">满分：</span>
-                          <span className="font-medium">{dimension.maxScore}</span>
-                        </div>
+                        <ScoringConfigSummary dimension={dimension} />
                         {dimension.dimensionType === "emotion_accuracy" && (
                           <div className="space-y-1">
                             {getEmotionCategories(dimension.emotionCategories).map(category => (
@@ -1751,14 +1767,14 @@ export default function AdminQuestionnaireDetail() {
                                       <p className="font-medium text-slate-800 mb-2 break-all">{groupTitle}</p>
                                       <div className="space-y-1">
                                         {group.answers.map((a: any) => (
-                                          <div key={a.id} className="flex items-center justify-between text-sm">
+                                          <div key={a.id} className="grid gap-2 py-2 text-sm sm:grid-cols-[10rem_minmax(0,1fr)]">
                                             <span className="text-slate-600">
                                               {a.evaluationDimensionId
                                             ? dimensionNameMap.get(a.evaluationDimensionId) || `维度#${a.evaluationDimensionId}`
                                                 : "评价"}
                                             </span>
-                                            <span className="font-medium text-slate-900">
-                                              {verdictLabel(pair, a.blindTestChoice)}
+                                            <span className="min-w-0 whitespace-pre-wrap break-words font-medium text-slate-900">
+                                              {formatAudioEvaluation(a.audioEvaluation) || verdictLabel(pair, a.blindTestChoice)}
                                             </span>
                                           </div>
                                         ))}

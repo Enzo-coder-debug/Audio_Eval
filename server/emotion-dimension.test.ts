@@ -16,6 +16,7 @@ vi.mock("./db", () => ({
   getAudioFileById: vi.fn(),
   deleteAnswersByResponse: vi.fn(),
   createAnswers: vi.fn(),
+  savePublicAnswerSnapshot: vi.fn(),
   updateResponse: vi.fn(),
 }));
 
@@ -84,8 +85,8 @@ describe("按组适用范围", () => {
     vi.mocked(db.getEvaluationDimensionsByQuestionnaire).mockResolvedValue([dimension] as any);
     vi.mocked(db.getAudioFileById).mockImplementation(async id => ({ groupLabel: id <= 2 ? "A" : "C" } as any));
     await expect(caller.response.submitPublic({ responseId: 1, answers: [] })).rejects.toThrow("答卷不完整");
-    expect(db.createAnswers).not.toHaveBeenCalled();
+    expect(db.savePublicAnswerSnapshot).not.toHaveBeenCalled();
     await caller.response.submitPublic({ responseId: 1, answers: [{ blindTestPairId: 20, evaluationDimensionId: 10, blindTestChoice: "same" }] });
-    expect(db.createAnswers).toHaveBeenCalledOnce();
+    expect(db.savePublicAnswerSnapshot).toHaveBeenCalledOnce();
   });
 });

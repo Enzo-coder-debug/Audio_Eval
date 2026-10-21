@@ -50,11 +50,18 @@
 
 ### 3.5 答题（答卷人，免登录）
 - 打开分享链接，填写姓名开始作答。
-- 对每一对音频（左/右）分维度选择：**左更好 / 一样 / 右更好**。
+- 按维度的打分方法作答：GSB 为 **左更好 / 一样 / 右更好**；量化打分为左/右音频独立评分，显示每个分值的判定规则；「其他」分别填写两个音频的文本观察。
 - 提交后记录 visitorName 与 visitorIp。
 - 有效期外或未发布的问卷无法作答。
 
-### 3.5.1 固定子问卷与限额发放
+### 3.5.1 量化打分与开放文本
+- 普通、音色相似度、情绪准确度维度可逐个选择 GSB 或量化。量化可配置最低分、最高分、步长，每档必须有非空判定规则；允许同分、零分与最多两位小数，2～101 档。旧维度缺省仍为 GSB。
+- 「其他」维度使用开放文本，每个音频最多 5000 字，可配置是否必填；默认选填，不计算分数，仅保存并导出供后续自然语言分析。
+- 量化与文本支持断点续答；提交检查已分配题目的所有必填项，拒绝越界分值、重复答案、类型混用和跨组评分。保存与提交使用事务，已提交不可覆盖。
+- 已发布或已有答卷时禁止修改评分维度；无答卷可下线后改，有答卷请复制后配置。复制保留所有量表和文本设置。
+- 详细规则与 0012 数据库迁移说明见 `QUANTITATIVE_SCORING.md`。
+
+### 3.5.2 固定子问卷与限额发放
 - 管理员在「分组发放」中指定每张子问卷的组别数量与发放份数，自动计算子问卷数量。以已生成配对中的有效组别为单位，随机分成固定、不重叠的子问卷；同组全部模型配对保持在同一张内。400 组设置每张 50 组、20 份，自动生成 8 张、总限额 160 份；不能整除时最后一张单独容纳余数组别（例如 410 组生成 8 张 50 组及 1 张 10 组），每张均按指定份数发放。组数超过题库则生成 1 张；最多生成 100 张。
 - 子问卷共用父问卷的背景、维度、有效期和分享链接，不产生独立发布链接。配置同时保存组别及配对 ID，不是每人重新随机抽 50 组。仅未发布且没有任何答卷时可以生成、重分或停用方案；已有答卷请复制问卷再配置。
 - 领取时从未领满的子问卷中等概率随机选择一张，在数据库事务中锁定父问卷、检查名额并创建答卷，防止并发超发。进行中、已提交、已评分都占用名额，不自动释放未完成的领取。相同浏览器标识 + 姓名续答复用同一答卷；已提交不可重复领取。匿名模式不保证跨浏览器/不同姓名的自然人去重。
@@ -64,6 +71,8 @@
 - 部署前在目标环境注入 DATABASE_URL，执行 `node scripts/apply-0011-migration.mjs --apply`，随后 `--check`。仅新增 questionnaires.subQuestionnairePlan（可空 JSON）及 responses.subQuestionnaireIndex（可空 INT），不回填或删除历史数据；可重复执行。启动检查缺列会停止启动，避免再次出现线上缺字段问题。
 
 ### 3.6 统计分析（管理员）
+- 单问卷量化评分按「维度 × 实际模型」单独汇总评分次数、均值与最高/最低分；文本显示非空观察数。不换算 GSB、不合并不同量表，不计算统一量化答卷总分。
+- Excel 保留两侧独立分值、文本、原文件名、音频 ID、模型及组别/配对/维度 ID，附评分规则工作表；用于后续自然语言分析。跨问卷聚合仍仅统计 GSB。
 - 答卷详情及 Excel 导出保留左右音频的完整原文件名（含扩展名、模型前后缀及数字前导零），不再简写成「音频X」；文件名缺失时明确标注，不推测原名。仅影响管理员查看与导出，答卷人仍使用左/右盲测标识，不改写文件、配对或历史答案。
 - **问卷统计**：答卷数、平均/最高/最低分、完成率。
 - **盲测聚合**：按「模型对比 × 评分维度」聚合所有判断，计算：
@@ -90,9 +99,9 @@
 | `questionnaires` | 问卷 | title、status、shareToken、evaluationCopywriting、scoringStandard、validFrom/Until |
 | `audioFiles` | 音频 | fileKey、fileUrl、modelName、groupLabel、questionnaireId |
 | `blindTestPairs` | 盲测配对 | leftAudioFileId、rightAudioFileId、pairIndex |
-| `evaluationDimensions` | 评分维度 | dimensionName、weight、maxScore |
+| `evaluationDimensions` | 评分维度 | dimensionName、weight、maxScore、scoringConfig |
 | `responses` | 答卷 | visitorName、visitorIp、status |
-| `answers` | 单条作答 | blindTestPairId、evaluationDimensionId、blindTestChoice |
+| `answers` | 单条作答 | blindTestPairId、evaluationDimensionId、blindTestChoice、audioEvaluation |
 | `questions` / `questionnaireStats` | AI 题目 / 缓存统计 | — |
 
 ## 5. 业务规则汇总

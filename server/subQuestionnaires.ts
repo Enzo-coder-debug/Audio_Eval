@@ -1,5 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
+import { evaluationAnswersError, type EvaluationAnswerInput } from "../shared/scoring";
 import { getDb } from "./db";
 import {
   answers,
@@ -14,7 +15,6 @@ import {
   readSubQuestionnairePlan,
   summarizeSubQuestionnaires,
 } from "../shared/subQuestionnaires";
-import { isDimensionApplicable } from "../shared/evaluationDimensions";
 
 async function requireDatabase() {
   const database = await getDb();
@@ -292,13 +292,7 @@ export async function saveSubQuestionnaireAnswers(
   input: {
     responseId: number;
     visitorToken?: string;
-    answers: {
-      blindTestPairId?: number;
-      evaluationDimensionId?: number;
-      blindTestChoice?: "left_better" | "same" | "right_better";
-      questionId?: number;
-      answerContent?: string;
-    }[];
+    answers: EvaluationAnswerInput[];
   },
   submit: boolean
 ) {
@@ -352,35 +346,8 @@ export async function saveSubQuestionnaireAnswers(
       .where(
         eq(evaluationDimensions.questionnaireId, response.questionnaireId)
       );
-    const allowed = new Set(
-      form.pairIds.flatMap(pairId =>
-        dimensions
-          .filter(dimension =>
-            isDimensionApplicable(dimension, labelsByPair.get(pairId) || "")
-          )
-          .map(dimension => `${pairId}:${dimension.id}`)
-      )
-    );
-    const seen = new Set<string>();
-    for (const answer of input.answers) {
-      const key = `${answer.blindTestPairId}:${answer.evaluationDimensionId}`;
-      if (
-        !answer.blindTestChoice ||
-        answer.questionId != null ||
-        !allowed.has(key) ||
-        seen.has(key)
-      )
-        throw new TRPCError({
-          code: "BAD_REQUEST",
-          message: "答案包含其他子问卷的题目、无效维度或重复评分",
-        });
-      seen.add(key);
-    }
-    if (submit && (allowed.size === 0 || seen.size !== allowed.size))
-      throw new TRPCError({
-        code: "BAD_REQUEST",
-        message: "请完成分配到的子问卷中全部适用维度的评分",
-      });
+    const error = evaluationAnswersError(dimensions, form.pairIds.map(id => ({ id, groupLabel: labelsByPair.get(id) || "" })), input.answers, submit);
+    if (error) throw new TRPCError({ code: "BAD_REQUEST", message: error });
     await transaction
       .delete(answers)
       .where(eq(answers.responseId, response.id));
@@ -390,7 +357,8 @@ export async function saveSubQuestionnaireAnswers(
           responseId: response.id,
           blindTestPairId: answer.blindTestPairId!,
           evaluationDimensionId: answer.evaluationDimensionId!,
-          blindTestChoice: answer.blindTestChoice!,
+          blindTestChoice: answer.blindTestChoice ?? null,
+          audioEvaluation: answer.audioEvaluation ?? null,
         }))
       );
     if (submit)

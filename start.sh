@@ -64,6 +64,10 @@ else
     echo "[start.sh] FATAL: sub-questionnaire schema check failed; confirm DATABASE_URL and run: node --import dotenv/config scripts/apply-0011-migration.mjs --apply" | tee -a "$LOG_DIR/app.log"
     exit 1
   fi
+  if ! "$NODE_BIN" --import dotenv/config scripts/apply-0012-migration.mjs --check >> "$LOG_DIR/app.log" 2>&1; then
+    echo "[start.sh] FATAL: scoring schema check failed; confirm DATABASE_URL and run: node --import dotenv/config scripts/apply-0012-migration.mjs --apply" | tee -a "$LOG_DIR/app.log"
+    exit 1
+  fi
   echo "[start.sh] $(date '+%F %T') launching: $NODE_BIN dist/index.js (v$("$NODE_BIN" -v 2>/dev/null))" >> "$LOG_DIR/app.log"
   echo "[start.sh] env check: DATABASE_URL=$([ -n "$DATABASE_URL" ] && echo set || echo MISSING) JWT_SECRET=$([ -n "$JWT_SECRET" ] && echo set || echo MISSING) ADMIN_USERNAME=$([ -n "$ADMIN_USERNAME" ] && echo set || echo MISSING)" >> "$LOG_DIR/app.log"
   # 后台启动，日志落盘；应用内部固定监听 0.0.0.0:8080
