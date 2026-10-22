@@ -5,6 +5,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { GroupLabelPicker } from "@/components/GroupLabelPicker";
 import { SubQuestionnaireDistribution } from "@/components/SubQuestionnaireDistribution";
+import { DeleteResponseButton } from "@/components/DeleteResponseButton";
+import { summarizeResponses } from "@shared/responseStats";
 import { ScoringConfigEditor, ScoringConfigSummary } from "@/components/ScoringConfigEditor";
 import { formatAudioEvaluation, getScoringConfig, scoringConfigSchema, type ScoringConfig } from "@shared/scoring";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -642,10 +644,9 @@ export default function AdminQuestionnaireDetail() {
   };
 
   // Calculate statistics
-  const totalResponses = responses?.length || 0;
-  const completedResponses = responses?.filter(r => r.status === "graded").length || 0;
-  const inProgressResponses = responses?.filter(r => r.status === "in_progress").length || 0;
-  const completionRate = totalResponses > 0 ? ((completedResponses / totalResponses) * 100).toFixed(1) : 0;
+  const responseSummary = summarizeResponses(responses ?? []);
+  const { totalResponses, completedResponses, inProgressResponses } = responseSummary;
+  const completionRate = responseSummary.completionRate.toFixed(1);
 
   // 维度 id -> 名称映射,用于在答卷详情里展示每个维度的选择
   const dimensionNameMap = new Map<number, string>(
@@ -1739,17 +1740,24 @@ export default function AdminQuestionnaireDetail() {
                             {response.submittedAt ? new Date(response.submittedAt).toLocaleString("zh-CN") : "-"}
                           </TableCell>
                           <TableCell>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() =>
-                                setExpandedResponseId(
-                                  expandedResponseId === response.id ? null : response.id
-                                )
-                              }
-                            >
-                              {expandedResponseId === response.id ? "收起" : "查看作答"}
-                            </Button>
+                            <div className="flex flex-wrap gap-2">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() =>
+                                  setExpandedResponseId(
+                                    expandedResponseId === response.id ? null : response.id
+                                  )
+                                }
+                              >
+                                {expandedResponseId === response.id ? "收起" : "查看作答"}
+                              </Button>
+                              <DeleteResponseButton
+                                questionnaireId={questionnaireId}
+                                response={response}
+                                onDeleted={() => setExpandedResponseId(current => current === response.id ? null : current)}
+                              />
+                            </div>
                           </TableCell>
                         </TableRow>
                         {expandedResponseId === response.id && (

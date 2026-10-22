@@ -136,7 +136,7 @@ export default function PublicQuestionnaire() {
   const saveProgressMutation = trpc.response.saveProgressPublic.useMutation({
     scope: { id: "public-questionnaire-autosave" },
     onSuccess: () => { toast.dismiss("autosave-failed"); },
-    onError: () => { if (!isSubmitting && !isCompleted) toast.error("自动保存失败，请保持页面打开并重试；提交成功前不要关闭页面。", { id: "autosave-failed" }); },
+    onError: (error) => { if (!isSubmitting && !isCompleted) toast.error(error.data?.code === "NOT_FOUND" ? "答卷不存在或已被管理员删除，请刷新页面重新填写。" : "自动保存失败，请保持页面打开并重试；提交成功前不要关闭页面。", { id: "autosave-failed" }); },
   });
 
   // Submit mutation
@@ -149,7 +149,7 @@ export default function PublicQuestionnaire() {
       if (responseId) clearPairIndex(responseId);
     },
     onError: (err) => {
-      toast.error(err.message || "提交失败");
+      toast.error(err.data?.code === "NOT_FOUND" ? "答卷不存在或已被管理员删除，请刷新页面重新填写。" : err.message || "提交失败");
       setIsSubmitting(false);
     },
   });

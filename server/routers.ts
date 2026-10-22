@@ -1146,6 +1146,10 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
    * Response and answer management
    */
   response: router({
+    delete: adminProcedure
+      .input(z.object({ questionnaireId: z.number().int().positive(), responseId: z.number().int().positive() }))
+      .mutation(({ input, ctx }) => db.deleteQuestionnaireResponse(input.questionnaireId, input.responseId, ctx.user.id)),
+
     /**
      * Start answering a questionnaire (public - anonymous)
      */
@@ -1330,20 +1334,7 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
           throw new TRPCError({ code: "FORBIDDEN" });
         }
 
-        // Create answer records
-        const answersList = input.answers.map(a => ({
-          responseId: input.responseId,
-          questionId: a.questionId,
-          answerContent: a.answerContent,
-        }));
-
-        await db.createAnswers(answersList);
-
-        // Update response status
-        await db.updateResponse(input.responseId, {
-          status: "submitted",
-          submittedAt: new Date(),
-        });
+        await db.submitAuthenticatedAnswers(input.responseId, ctx.user.id, input.answers);
 
         // Trigger AI grading (can be async)
         gradeResponse(input.responseId).catch(err => console.error("Grading failed:", err));
@@ -1842,25 +1833,7 @@ Provide a JSON response with:
     });
 
     // Update questionnaire stats
-    const stats = await db.getOrCreateStats(response.questionnaireId);
-    const allResponses = await db.getQuestionnaireResponses(response.questionnaireId);
-    const gradedResponses = allResponses.filter(r => r.status === "graded");
-
-    if (gradedResponses.length > 0) {
-      const scores = gradedResponses.map(r => Number(r.totalScore) || 0);
-      const avgScore = scores.reduce((a, b) => a + b, 0) / scores.length;
-      const maxScore = Math.max(...scores);
-      const minScore = Math.min(...scores);
-      const completionRate = (gradedResponses.length / allResponses.length) * 100;
-
-      await db.updateStats(response.questionnaireId, {
-        totalResponses: allResponses.length,
-        averageScore: avgScore.toString(),
-        highestScore: maxScore.toString(),
-        lowestScore: minScore.toString(),
-        completionRate: completionRate.toString(),
-      });
-    }
+    await db.getOrCreateStats(response.questionnaireId);
   } catch (error) {
     console.error("Failed to grade response:", error);
   }

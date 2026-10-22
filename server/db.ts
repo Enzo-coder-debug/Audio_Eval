@@ -23,6 +23,7 @@ import {
 import { ENV } from './_core/env';
 import { buildFilenameGroupUpdates } from "../shared/audioGroupLabels";
 import { TRPCError } from "@trpc/server";
+import { summarizeResponses } from "../shared/responseStats";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -350,6 +351,30 @@ export async function getQuestionnaireResponses(questionnaireId: number) {
     .orderBy(desc(responses.submittedAt));
 }
 
+export async function deleteQuestionnaireResponse(questionnaireId: number, responseId: number, creatorId: number) {
+  const database = await getDb();
+  if (!database) throw new Error("Database not available");
+
+  return database.transaction(async transaction => {
+    const [questionnaire] = await transaction.select().from(questionnaires)
+      .where(eq(questionnaires.id, questionnaireId)).for("update");
+    if (!questionnaire || questionnaire.creatorId !== creatorId) {
+      throw new TRPCError({ code: "FORBIDDEN", message: "无权删除此问卷的答卷" });
+    }
+    const [response] = await transaction.select().from(responses)
+      .where(and(eq(responses.id, responseId), eq(responses.questionnaireId, questionnaireId)))
+      .for("update");
+    if (!response) {
+      throw new TRPCError({ code: "NOT_FOUND", message: "答卷不存在或已删除，请刷新列表" });
+    }
+
+    await transaction.delete(answers).where(eq(answers.responseId, responseId));
+    await transaction.delete(responses).where(eq(responses.id, responseId));
+    const stats = await recalculateQuestionnaireStats(transaction, questionnaireId);
+    return { success: true, responseId, releasedQuota: response.subQuestionnaireIndex != null ? 1 : 0, stats };
+  });
+}
+
 export async function getBlindTestPairById(id: number) {
   const db = await getDb();
   if (!db) return undefined;
@@ -466,6 +491,21 @@ export async function savePublicAnswerSnapshot(responseId: number, visitorToken:
   });
 }
 
+export async function submitAuthenticatedAnswers(responseId: number, userId: number, answerList: { questionId: number; answerContent: string }[]) {
+  const database = await getDb();
+  if (!database) throw new Error("Database not available");
+  return database.transaction(async transaction => {
+    const [response] = await transaction.select().from(responses)
+      .where(eq(responses.id, responseId)).for("update");
+    if (!response || response.userId !== userId) throw new TRPCError({ code: "FORBIDDEN" });
+    if (response.status !== "in_progress") throw new TRPCError({ code: "BAD_REQUEST", message: "答卷已提交，请联系管理员删除后重新填写" });
+    await transaction.delete(answers).where(eq(answers.responseId, responseId));
+    if (answerList.length) await transaction.insert(answers).values(answerList.map(answer => ({ ...answer, responseId })));
+    await transaction.update(responses).set({ status: "submitted", submittedAt: new Date() })
+      .where(eq(responses.id, responseId));
+  });
+}
+
 export async function getAnswersByResponse(responseId: number) {
   const db = await getDb();
   if (!db) return [];
@@ -496,22 +536,36 @@ export async function updateAnswer(id: number, updates: Partial<typeof answers.$
 /**
  * Stats operations
  */
+type DatabaseTransaction = Parameters<Parameters<NonNullable<Awaited<ReturnType<typeof getDb>>>["transaction"]>[0]>[0];
+
+async function recalculateQuestionnaireStats(transaction: DatabaseTransaction, questionnaireId: number) {
+  const rows = await transaction.select({ status: responses.status, totalScore: responses.totalScore })
+    .from(responses).where(eq(responses.questionnaireId, questionnaireId));
+  const summary = summarizeResponses(rows);
+  const values = {
+    totalResponses: summary.totalResponses,
+    averageScore: summary.averageScore?.toFixed(2) ?? null,
+    highestScore: summary.highestScore?.toFixed(2) ?? null,
+    lowestScore: summary.lowestScore?.toFixed(2) ?? null,
+    completionRate: summary.completionRate.toFixed(2),
+    lastUpdated: new Date(),
+  };
+  await transaction.insert(questionnaireStats).values({ questionnaireId, ...values })
+    .onDuplicateKeyUpdate({ set: values });
+  const [stats] = await transaction.select().from(questionnaireStats)
+    .where(eq(questionnaireStats.questionnaireId, questionnaireId));
+  return stats;
+}
+
 export async function getOrCreateStats(questionnaireId: number) {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
-  
-  let stats = await db.select().from(questionnaireStats)
-    .where(eq(questionnaireStats.questionnaireId, questionnaireId))
-    .limit(1);
-  
-  if (!stats.length) {
-    await db.insert(questionnaireStats).values({ questionnaireId });
-    stats = await db.select().from(questionnaireStats)
-      .where(eq(questionnaireStats.questionnaireId, questionnaireId))
-      .limit(1);
-  }
-  
-  return stats[0];
+  const database = await getDb();
+  if (!database) throw new Error("Database not available");
+  return database.transaction(async transaction => {
+    const [questionnaire] = await transaction.select({ id: questionnaires.id }).from(questionnaires)
+      .where(eq(questionnaires.id, questionnaireId)).for("update");
+    if (!questionnaire) throw new TRPCError({ code: "NOT_FOUND" });
+    return recalculateQuestionnaireStats(transaction, questionnaireId);
+  });
 }
 
 export async function updateStats(questionnaireId: number, updates: Partial<typeof questionnaireStats.$inferInsert>) {
