@@ -1,5 +1,7 @@
 # 脚手架文档（Architecture）
 
+依赖安装超时与构建源配置见 [构建排障](BUILD_TROUBLESHOOTING.md)。
+
 > 音频盲测评估平台（audio_evaluation_platform）—— 技术栈、目录结构、分层设计、开发与部署流程。
 
 ## 1. 项目概述

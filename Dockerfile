@@ -21,16 +21,23 @@ ENV PORT=8080
 # 应用代码目录（勿用 /export，该目录会被平台挂载覆盖）
 WORKDIR /opt/app
 
-# 启用 corepack 以使用 package.json 指定的 pnpm 版本
-RUN corepack enable || npm i -g corepack && corepack enable
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+ENV npm_config_registry=${NPM_REGISTRY}
+ENV COREPACK_NPM_REGISTRY=${NPM_REGISTRY}
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+ENV COREPACK_DEFAULT_TO_LATEST=0
 
 # 先拷贝依赖清单与补丁，最大化利用构建缓存
-COPY package.json pnpm-lock.yaml ./
+COPY package.json pnpm-lock.yaml .npmrc ./
 COPY patches ./patches
 
+RUN export COREPACK_NPM_REGISTRY="${COREPACK_NPM_REGISTRY%/}" \
+  && if ! command -v corepack >/dev/null 2>&1; then npm install --global corepack@0.31.0 --registry="$COREPACK_NPM_REGISTRY"; fi \
+  && corepack enable \
+  && corepack prepare "$(node -p 'require("./package.json").packageManager')" --activate
+
 # 安装全部依赖（含 devDependencies，构建需要 vite/esbuild）
-RUN pnpm config set registry https://registry.npmmirror.com/ \
-  && pnpm install --frozen-lockfile
+RUN COREPACK_NPM_REGISTRY="${COREPACK_NPM_REGISTRY%/}" pnpm install --frozen-lockfile --prod=false --registry="$npm_config_registry"
 
 # 拷贝其余源码并构建（vite build -> dist/public，esbuild -> dist/index.js）
 COPY . .
