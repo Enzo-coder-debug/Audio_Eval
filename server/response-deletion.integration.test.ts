@@ -12,6 +12,7 @@ import { readFile } from "node:fs/promises";
 import { appRouter } from "./routers";
 import type { TrpcContext } from "./_core/context";
 import * as db from "./db";
+import { MAX_RESPONSE_DELETE_BATCH } from "../shared/responseDeletion";
 import {
   allocateSubQuestionnaire,
   configureSubQuestionnaires,
@@ -466,6 +467,285 @@ describe.skipIf(!testUrl)("隔离 MySQL 删除答卷与名额回收", () => {
       db.submitAuthenticatedAnswers(responseId, 71, answers)
     ).rejects.toMatchObject({ code: "FORBIDDEN" });
     expect(await count("answers", "responseId", responseId)).toBe(0);
+  });
+
+  it("跨子问卷批量删除混合状态答卷，仅回收所选记录名额并保留其他答卷", async () => {
+    await connection.execute(
+      "UPDATE questionnaires SET status='draft' WHERE id=?",
+      [questionnaireId]
+    );
+    await configureSubQuestionnaires(
+      { questionnaireId, enabled: true, groupsPerForm: 1, quota: 2 },
+      ownerId
+    );
+    await connection.execute(
+      "UPDATE questionnaires SET status='published' WHERE id=?",
+      [questionnaireId]
+    );
+    const assignments = [];
+    for (let index = 0; index < 4; index++) {
+      const assignment = await allocateSubQuestionnaire(identity(index + 20));
+      assignments.push(assignment);
+      await seedAnswers(assignment.responseId, assignment.form.pairIds[0]);
+      await connection.execute(
+        "UPDATE responses SET status='graded',totalScore=6 WHERE id=?",
+        [assignment.responseId]
+      );
+    }
+    const targets = [1, 2].map(
+      formIndex =>
+        assignments.find(assignment => assignment.form.index === formIndex)!
+    );
+    const targetIds = targets.map(target => target.responseId);
+    await connection.execute(
+      "UPDATE responses SET status='in_progress',totalScore=NULL WHERE id=?",
+      [targetIds[0]]
+    );
+    await connection.execute(
+      "UPDATE responses SET status='submitted',totalScore=NULL WHERE id=?",
+      [targetIds[1]]
+    );
+    const previousPlan = (await db.getQuestionnaireById(questionnaireId))
+      ?.subQuestionnairePlan;
+    const result = await owner.response.deleteBatch({
+      questionnaireId,
+      responseIds: targetIds,
+    });
+    expect(result).toMatchObject({
+      deletedCount: 2,
+      releasedQuota: 2,
+      stats: {
+        totalResponses: 2,
+        completionRate: "100.00",
+        averageScore: "6.00",
+      },
+    });
+    expect(result.responseIds).toEqual(
+      [...targetIds].sort((left, right) => left - right)
+    );
+    for (const assignment of assignments) {
+      const removed = targetIds.includes(assignment.responseId);
+      expect(await count("responses", "id", assignment.responseId)).toBe(
+        removed ? 0 : 1
+      );
+      expect(await count("answers", "responseId", assignment.responseId)).toBe(
+        removed ? 0 : 2
+      );
+    }
+    const distribution = await getSubQuestionnaireDistribution(
+      questionnaireId,
+      ownerId
+    );
+    expect(
+      distribution.forms.every(
+        form => form.assigned === 1 && form.remaining === 1 && form.quota === 2
+      )
+    ).toBe(true);
+    expect(
+      (await db.getQuestionnaireById(questionnaireId))?.subQuestionnairePlan
+    ).toEqual(previousPlan);
+    expect(
+      (await owner.response.listQuestionnaire({ questionnaireId })).responses
+    ).toHaveLength(2);
+    const samples = (await owner.stats.aggregate({ questionnaireId }))
+      .responseSamples;
+    expect(samples).toHaveLength(2);
+    expect(samples.every(sample => !targetIds.includes(sample.id))).toBe(true);
+    const originalIndex = assignments.findIndex(
+      assignment => assignment.responseId === targetIds[0]
+    );
+    const replacement = await visitor.response.startPublic(
+      identity(originalIndex + 20)
+    );
+    expect(targetIds).not.toContain(replacement.responseId);
+    expect(replacement.savedAnswers).toEqual([]);
+  });
+
+  it("批量删空后统计归零，重复请求不能重复释放名额", async () => {
+    const first = await allocateSubQuestionnaire(identity(1));
+    const second = await allocateSubQuestionnaire(identity(2));
+    const input = {
+      questionnaireId,
+      responseIds: [first.responseId, second.responseId],
+    };
+    const result = await owner.response.deleteBatch(input);
+    expect(result).toMatchObject({
+      deletedCount: 2,
+      releasedQuota: 2,
+      stats: { totalResponses: 0, completionRate: "0.00", averageScore: null },
+    });
+    await expect(owner.response.deleteBatch(input)).rejects.toMatchObject({
+      code: "NOT_FOUND",
+    });
+    expect(
+      (
+        await getSubQuestionnaireDistribution(questionnaireId, ownerId)
+      ).forms.every(form => form.assigned === 0 && form.remaining === 1)
+    ).toBe(true);
+  });
+
+  it("批次混入其他问卷或已经失效的答卷时整批不删除", async () => {
+    const target = await allocateSubQuestionnaire(identity(1));
+    const other = await allocateSubQuestionnaire(identity(2));
+    const foreignId = await ordinaryResponse();
+    await seedAnswers(target.responseId, target.form.pairIds[0]);
+    await expect(
+      owner.response.deleteBatch({
+        questionnaireId,
+        responseIds: [target.responseId, foreignId],
+      })
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(await count("responses", "id", foreignId)).toBe(1);
+    expect(await count("responses", "id", target.responseId)).toBe(1);
+    await remove(other.responseId);
+    await expect(
+      owner.response.deleteBatch({
+        questionnaireId,
+        responseIds: [target.responseId, other.responseId],
+      })
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(await count("responses", "id", target.responseId)).toBe(1);
+    expect(await count("answers", "responseId", target.responseId)).toBe(2);
+    expect((await db.getOrCreateStats(questionnaireId)).totalResponses).toBe(1);
+  });
+
+  it("批量删除拒绝越权和重复 ID，不触碰已选记录", async () => {
+    const target = await allocateSubQuestionnaire(identity(1));
+    await expect(
+      makeCaller({ id: 42, role: "admin" }).response.deleteBatch({
+        questionnaireId,
+        responseIds: [target.responseId],
+      })
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(
+      db.deleteQuestionnaireResponses(
+        questionnaireId,
+        [target.responseId, target.responseId],
+        ownerId
+      )
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(await count("responses", "id", target.responseId)).toBe(1);
+  });
+
+  it("批量统计写入失败时，两份答卷、全部答案与名额均回滚", async () => {
+    const first = await allocateSubQuestionnaire(identity(1));
+    const second = await allocateSubQuestionnaire(identity(2));
+    for (const target of [first, second])
+      await seedAnswers(target.responseId, target.form.pairIds[0]);
+    await db.getOrCreateStats(questionnaireId);
+    await connection.query(
+      "CREATE TRIGGER fail_batch_response_delete_stats BEFORE INSERT ON questionnaireStats FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='test_batch_stats_failure'"
+    );
+    try {
+      await expect(
+        owner.response.deleteBatch({
+          questionnaireId,
+          responseIds: [first.responseId, second.responseId],
+        })
+      ).rejects.toThrow();
+    } finally {
+      await connection.query("DROP TRIGGER fail_batch_response_delete_stats");
+    }
+    for (const target of [first, second]) {
+      expect(await count("responses", "id", target.responseId)).toBe(1);
+      expect(await count("answers", "responseId", target.responseId)).toBe(2);
+    }
+    expect(
+      (
+        await getSubQuestionnaireDistribution(questionnaireId, ownerId)
+      ).forms.every(form => form.remaining === 0)
+    ).toBe(true);
+    expect((await db.getOrCreateStats(questionnaireId)).totalResponses).toBe(2);
+  });
+
+  it("并发重叠批次只有一批成功，另一批不部分删除剩余记录", async () => {
+    const responseIds = [
+      await ordinaryResponse(),
+      await ordinaryResponse(),
+      await ordinaryResponse(),
+    ];
+    const results = await Promise.allSettled([
+      owner.response.deleteBatch({
+        questionnaireId: ordinaryQuestionnaireId,
+        responseIds: responseIds.slice(0, 2),
+      }),
+      owner.response.deleteBatch({
+        questionnaireId: ordinaryQuestionnaireId,
+        responseIds: responseIds.slice(1),
+      }),
+    ]);
+    expect(
+      results.filter(result => result.status === "fulfilled")
+    ).toHaveLength(1);
+    expect(results.find(result => result.status === "rejected")).toMatchObject({
+      reason: { code: "NOT_FOUND" },
+    });
+    const remaining = await db.getQuestionnaireResponses(
+      ordinaryQuestionnaireId
+    );
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].id).not.toBe(responseIds[1]);
+    expect(
+      (await db.getOrCreateStats(ordinaryQuestionnaireId)).totalResponses
+    ).toBe(1);
+  });
+
+  it("批量删除与多人领取并发时仍不超发", async () => {
+    const first = await allocateSubQuestionnaire(identity(1));
+    const second = await allocateSubQuestionnaire(identity(2));
+    const results = await Promise.allSettled([
+      owner.response.deleteBatch({
+        questionnaireId,
+        responseIds: [first.responseId, second.responseId],
+      }),
+      visitor.response.startPublic(identity(3)),
+      visitor.response.startPublic(identity(4)),
+      visitor.response.startPublic(identity(5)),
+    ]);
+    expect(results[0].status).toBe("fulfilled");
+    expect(
+      results.slice(1).filter(result => result.status === "fulfilled").length
+    ).toBeLessThanOrEqual(2);
+    const distribution = await getSubQuestionnaireDistribution(
+      questionnaireId,
+      ownerId
+    );
+    expect(distribution.responseCount).toBeLessThanOrEqual(2);
+    expect(
+      distribution.forms.every(
+        form => form.assigned <= form.quota && form.remaining >= 0
+      )
+    ).toBe(true);
+  });
+
+  it("支持上限批次一次删除，统计只保留未选答卷", async () => {
+    const values = Array.from(
+      { length: MAX_RESPONSE_DELETE_BATCH + 1 },
+      (_, index) => [ordinaryQuestionnaireId, `批量测试${index}`, "submitted"]
+    );
+    await connection.query(
+      "INSERT INTO responses (questionnaireId,visitorName,status) VALUES ?",
+      [values]
+    );
+    const rows = await db.getQuestionnaireResponses(ordinaryQuestionnaireId);
+    const targetIds = rows
+      .slice(0, MAX_RESPONSE_DELETE_BATCH)
+      .map(response => response.id);
+    const result = await owner.response.deleteBatch({
+      questionnaireId: ordinaryQuestionnaireId,
+      responseIds: targetIds,
+    });
+    expect(result).toMatchObject({
+      deletedCount: MAX_RESPONSE_DELETE_BATCH,
+      releasedQuota: 0,
+      stats: { totalResponses: 1, completionRate: "100.00" },
+    });
+    expect(result.responseIds).toHaveLength(MAX_RESPONSE_DELETE_BATCH);
+    expect(
+      (await db.getQuestionnaireResponses(ordinaryQuestionnaireId)).map(
+        response => response.id
+      )
+    ).toEqual([rows[MAX_RESPONSE_DELETE_BATCH].id]);
   });
 
   it.each(["public", "authenticated"])(

@@ -241,6 +241,254 @@ describe.skipIf(!testUrl)("隔离 MySQL 量化评分全流程", () => {
   });
 
   it.each([false, true])(
+    "维度排序只改展示顺序，公开页及副本保持一致，历史作答可续填（子问卷=%s）",
+    async subQuestionnaire => {
+      const test = await fixture(subQuestionnaire);
+      const session = await start(test, `reorder-${subQuestionnaire}`);
+      await publicCaller.response.saveProgressPublic(session.input);
+      const savedAnswers = await db.getAnswersByResponse(
+        session.response.responseId
+      );
+      const savedQuestionnaire = await db.getQuestionnaireById(
+        test.questionnaireId
+      );
+      const expectedDimensionIds = test.dimensions.map(
+        dimension => dimension.id
+      );
+      const orderedDimensionIds = [...expectedDimensionIds].reverse();
+      await admin.dimension.reorder({
+        questionnaireId: test.questionnaireId,
+        expectedDimensionIds,
+        orderedDimensionIds,
+      });
+      const reordered = await admin.dimension.list({
+        questionnaireId: test.questionnaireId,
+      });
+      expect(reordered.map(dimension => dimension.id)).toEqual(
+        orderedDimensionIds
+      );
+      expect(reordered.map(dimension => dimension.orderIndex)).toEqual([
+        0, 1, 2, 3,
+      ]);
+      const unchangedFields = (dimensions: typeof reordered) =>
+        dimensions
+          .map(({ orderIndex, updatedAt, ...dimension }) => dimension)
+          .sort((left, right) => left.id - right.id);
+      expect(unchangedFields(reordered)).toEqual(
+        unchangedFields(test.dimensions)
+      );
+      expect(await db.getQuestionnaireById(test.questionnaireId)).toEqual(
+        savedQuestionnaire
+      );
+      expect(
+        await db.getAnswersByResponse(session.response.responseId)
+      ).toEqual(savedAnswers);
+      const publicQuestionnaire =
+        await publicCaller.questionnaire.getByShareToken({
+          shareToken: test.shareToken,
+          responseId: session.response.responseId,
+          visitorToken: session.visitor.visitorToken,
+        });
+      expect(
+        publicQuestionnaire.dimensions.map(dimension => dimension.id)
+      ).toEqual(orderedDimensionIds);
+      await publicCaller.response.submitPublic(session.input);
+      const copied = await admin.questionnaire.duplicate({
+        id: test.questionnaireId,
+      });
+      const copiedDimensions = await admin.dimension.list({
+        questionnaireId: copied.questionnaireId,
+      });
+      expect(
+        copiedDimensions.map(dimension => dimension.dimensionName)
+      ).toEqual(reordered.map(dimension => dimension.dimensionName));
+      expect(
+        copiedDimensions.map(dimension => dimension.scoringConfig)
+      ).toEqual(reordered.map(dimension => dimension.scoringConfig));
+      const submittedAnswers = await db.getAnswersByResponse(
+        session.response.responseId
+      );
+      await admin.dimension.reorder({
+        questionnaireId: test.questionnaireId,
+        expectedDimensionIds: orderedDimensionIds,
+        orderedDimensionIds: expectedDimensionIds,
+      });
+      expect(
+        await db.getAnswersByResponse(session.response.responseId)
+      ).toEqual(submittedAnswers);
+      await expect(
+        admin.dimension.update({
+          id: expectedDimensionIds[0],
+          dimensionName: "不可修改规则",
+        })
+      ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    }
+  );
+
+  it("重复历史序号按 ID 稳定排序，重排后序号连续", async () => {
+    const { questionnaireId } = await admin.audio.createQuestionnaire({
+      title: "旧维度排序",
+      evaluationCopywriting: "测试",
+    });
+    await connection.execute(
+      "UPDATE evaluationDimensions SET orderIndex=9 WHERE questionnaireId=?",
+      [questionnaireId]
+    );
+    const dimensions = await admin.dimension.list({ questionnaireId });
+    const expectedDimensionIds = dimensions.map(dimension => dimension.id);
+    expect(expectedDimensionIds).toEqual(
+      [...expectedDimensionIds].sort((left, right) => left - right)
+    );
+    const orderedDimensionIds = [...expectedDimensionIds].reverse();
+    await admin.dimension.reorder({
+      questionnaireId,
+      expectedDimensionIds,
+      orderedDimensionIds,
+    });
+    expect(
+      (await admin.dimension.list({ questionnaireId })).map(dimension => [
+        dimension.id,
+        dimension.orderIndex,
+      ])
+    ).toEqual(
+      orderedDimensionIds.map((dimensionId, index) => [dimensionId, index])
+    );
+  });
+
+  it("其他管理员、遗漏维度和跨问卷 ID 不能排序，全部保持原状", async () => {
+    const test = await fixture(false);
+    const foreign = await fixture(false);
+    const expectedDimensionIds = test.dimensions.map(dimension => dimension.id);
+    const input = {
+      questionnaireId: test.questionnaireId,
+      expectedDimensionIds,
+      orderedDimensionIds: [...expectedDimensionIds].reverse(),
+    };
+    await expect(stranger.dimension.reorder(input)).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
+    await expect(
+      admin.dimension.reorder({ ...input, questionnaireId: 2147483647 })
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    const incomplete = expectedDimensionIds.slice(1);
+    const crossQuestionnaire = [
+      ...expectedDimensionIds.slice(1),
+      foreign.dimensions[0].id,
+    ];
+    for (const ids of [incomplete, crossQuestionnaire]) {
+      await expect(
+        admin.dimension.reorder({
+          ...input,
+          expectedDimensionIds: ids,
+          orderedDimensionIds: [...ids].reverse(),
+        })
+      ).rejects.toMatchObject({ code: "CONFLICT" });
+    }
+    expect(
+      await admin.dimension.list({ questionnaireId: test.questionnaireId })
+    ).toEqual(test.dimensions);
+    expect(
+      await admin.dimension.list({ questionnaireId: foreign.questionnaireId })
+    ).toEqual(foreign.dimensions);
+  });
+
+  it("保存期间新增维度或顺序已变更时拒绝过期列表", async () => {
+    const { questionnaireId } = await admin.audio.createQuestionnaire({
+      title: "并发新增维度",
+      evaluationCopywriting: "测试",
+    });
+    const expectedDimensionIds = (
+      await admin.dimension.list({ questionnaireId })
+    ).map(dimension => dimension.id);
+    await admin.dimension.create({
+      questionnaireId,
+      dimensionName: "新增维度",
+      orderIndex: 10,
+    });
+    const before = await admin.dimension.list({ questionnaireId });
+    await expect(
+      admin.dimension.reorder({
+        questionnaireId,
+        expectedDimensionIds,
+        orderedDimensionIds: [...expectedDimensionIds].reverse(),
+      })
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(await admin.dimension.list({ questionnaireId })).toEqual(before);
+    const currentIds = before.map(dimension => dimension.id);
+    await admin.dimension.reorder({
+      questionnaireId,
+      expectedDimensionIds: currentIds,
+      orderedDimensionIds: [...currentIds].reverse(),
+    });
+    await expect(
+      admin.dimension.reorder({
+        questionnaireId,
+        expectedDimensionIds: currentIds,
+        orderedDimensionIds: currentIds,
+      })
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("两个并发排序只允许一个保存，不覆盖较新的顺序", async () => {
+    const test = await fixture(false);
+    const expectedDimensionIds = test.dimensions.map(dimension => dimension.id);
+    const proposals = [
+      [...expectedDimensionIds].reverse(),
+      [...expectedDimensionIds.slice(1), expectedDimensionIds[0]],
+    ];
+    const results = await Promise.allSettled(
+      proposals.map(orderedDimensionIds =>
+        admin.dimension.reorder({
+          questionnaireId: test.questionnaireId,
+          expectedDimensionIds,
+          orderedDimensionIds,
+        })
+      )
+    );
+    expect(
+      results.filter(result => result.status === "fulfilled")
+    ).toHaveLength(1);
+    expect(results.filter(result => result.status === "rejected")).toHaveLength(
+      1
+    );
+    const failed = results.find(result => result.status === "rejected");
+    expect(failed?.status === "rejected" && failed.reason.code).toBe(
+      "CONFLICT"
+    );
+    const winnerIndex = results.findIndex(
+      result => result.status === "fulfilled"
+    );
+    expect(
+      (
+        await admin.dimension.list({ questionnaireId: test.questionnaireId })
+      ).map(dimension => dimension.id)
+    ).toEqual(proposals[winnerIndex]);
+  });
+
+  it("中途数据库错误回滚全部顺序", async () => {
+    const test = await fixture(false);
+    const expectedDimensionIds = test.dimensions.map(dimension => dimension.id);
+    const orderedDimensionIds = [...expectedDimensionIds].reverse();
+    await connection.query(
+      `CREATE TRIGGER fail_dimension_reorder BEFORE UPDATE ON evaluationDimensions FOR EACH ROW BEGIN IF OLD.id = ${orderedDimensionIds[1]} THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'dimension reorder rollback test'; END IF; END`
+    );
+    try {
+      await expect(
+        admin.dimension.reorder({
+          questionnaireId: test.questionnaireId,
+          expectedDimensionIds,
+          orderedDimensionIds,
+        })
+      ).rejects.toThrow();
+      expect(
+        await admin.dimension.list({ questionnaireId: test.questionnaireId })
+      ).toEqual(test.dimensions);
+    } finally {
+      await connection.query("DROP TRIGGER IF EXISTS fail_dimension_reorder");
+    }
+  });
+
+  it.each([false, true])(
     "整卷/子问卷：零分、部分保存、续答、完整提交和提交后保护（子问卷=%s）",
     async subQuestionnaire => {
       const test = await fixture(subQuestionnaire);

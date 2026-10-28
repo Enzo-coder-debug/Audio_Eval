@@ -24,6 +24,8 @@ import { ENV } from './_core/env';
 import { buildFilenameGroupUpdates } from "../shared/audioGroupLabels";
 import { TRPCError } from "@trpc/server";
 import { summarizeResponses } from "../shared/responseStats";
+import { responseDeletionIdsSchema } from "../shared/responseDeletion";
+import { dimensionOrderSchema } from "../shared/dimensionOrder";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -352,6 +354,14 @@ export async function getQuestionnaireResponses(questionnaireId: number) {
 }
 
 export async function deleteQuestionnaireResponse(questionnaireId: number, responseId: number, creatorId: number) {
+  const result = await deleteQuestionnaireResponses(questionnaireId, [responseId], creatorId);
+  return { success: true, responseId, releasedQuota: result.releasedQuota, stats: result.stats };
+}
+
+export async function deleteQuestionnaireResponses(questionnaireId: number, responseIds: number[], creatorId: number) {
+  const parsed = responseDeletionIdsSchema.safeParse(responseIds);
+  if (!parsed.success) throw new TRPCError({ code: "BAD_REQUEST", message: parsed.error.issues[0].message });
+  const selectedIds = [...parsed.data].sort((left, right) => left - right);
   const database = await getDb();
   if (!database) throw new Error("Database not available");
 
@@ -361,17 +371,18 @@ export async function deleteQuestionnaireResponse(questionnaireId: number, respo
     if (!questionnaire || questionnaire.creatorId !== creatorId) {
       throw new TRPCError({ code: "FORBIDDEN", message: "无权删除此问卷的答卷" });
     }
-    const [response] = await transaction.select().from(responses)
-      .where(and(eq(responses.id, responseId), eq(responses.questionnaireId, questionnaireId)))
+    const selectedResponses = await transaction.select().from(responses)
+      .where(and(inArray(responses.id, selectedIds), eq(responses.questionnaireId, questionnaireId)))
+      .orderBy(responses.id)
       .for("update");
-    if (!response) {
-      throw new TRPCError({ code: "NOT_FOUND", message: "答卷不存在或已删除，请刷新列表" });
+    if (selectedResponses.length !== selectedIds.length) {
+      throw new TRPCError({ code: "NOT_FOUND", message: "部分答卷不存在、已删除或不属于此问卷；本次未删除任何答卷，请刷新列表后重试" });
     }
 
-    await transaction.delete(answers).where(eq(answers.responseId, responseId));
-    await transaction.delete(responses).where(eq(responses.id, responseId));
+    await transaction.delete(answers).where(inArray(answers.responseId, selectedIds));
+    await transaction.delete(responses).where(and(eq(responses.questionnaireId, questionnaireId), inArray(responses.id, selectedIds)));
     const stats = await recalculateQuestionnaireStats(transaction, questionnaireId);
-    return { success: true, responseId, releasedQuota: response.subQuestionnaireIndex != null ? 1 : 0, stats };
+    return { success: true, responseIds: selectedIds, deletedCount: selectedResponses.length, releasedQuota: selectedResponses.filter(response => response.subQuestionnaireIndex != null).length, stats };
   });
 }
 
@@ -614,7 +625,34 @@ export async function getEvaluationDimensionsByQuestionnaire(questionnaireId: nu
   
   return await db.select().from(evaluationDimensions)
     .where(eq(evaluationDimensions.questionnaireId, questionnaireId))
-    .orderBy(evaluationDimensions.orderIndex);
+    .orderBy(evaluationDimensions.orderIndex, evaluationDimensions.id);
+}
+
+export async function reorderEvaluationDimensions(input: { questionnaireId: number; expectedDimensionIds: number[]; orderedDimensionIds: number[] }, creatorId: number) {
+  const parsed = dimensionOrderSchema.safeParse(input);
+  if (!parsed.success) throw new TRPCError({ code: "BAD_REQUEST", message: parsed.error.issues[0].message });
+  const { questionnaireId, expectedDimensionIds, orderedDimensionIds } = parsed.data;
+  const database = await getDb();
+  if (!database) throw new Error("Database not available");
+  return database.transaction(async transaction => {
+    const [questionnaire] = await transaction.select().from(questionnaires)
+      .where(eq(questionnaires.id, questionnaireId)).for("update");
+    if (!questionnaire || questionnaire.creatorId !== creatorId) {
+      throw new TRPCError({ code: "FORBIDDEN", message: "无权调整此问卷的测评维度顺序" });
+    }
+    const currentDimensions = await transaction.select({ id: evaluationDimensions.id }).from(evaluationDimensions)
+      .where(eq(evaluationDimensions.questionnaireId, questionnaireId))
+      .orderBy(evaluationDimensions.orderIndex, evaluationDimensions.id).for("update");
+    if (currentDimensions.length !== expectedDimensionIds.length || currentDimensions.some((dimension, index) => dimension.id !== expectedDimensionIds[index])) {
+      throw new TRPCError({ code: "CONFLICT", message: "测评维度或顺序已变更，请刷新后重新调整；本次未保存" });
+    }
+    for (let orderIndex = 0; orderIndex < orderedDimensionIds.length; orderIndex++) {
+      const dimensionId = orderedDimensionIds[orderIndex];
+      await transaction.update(evaluationDimensions).set({ orderIndex })
+        .where(and(eq(evaluationDimensions.questionnaireId, questionnaireId), eq(evaluationDimensions.id, dimensionId)));
+    }
+    return { success: true, orderedDimensionIds };
+  });
 }
 
 export async function getEvaluationDimensionById(id: number) {

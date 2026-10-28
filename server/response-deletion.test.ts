@@ -4,8 +4,12 @@ import { appRouter } from "./routers";
 import type { TrpcContext } from "./_core/context";
 import * as db from "./db";
 import { summarizeResponses } from "../shared/responseStats";
+import { MAX_RESPONSE_DELETE_BATCH } from "../shared/responseDeletion";
 
-vi.mock("./db", () => ({ deleteQuestionnaireResponse: vi.fn() }));
+vi.mock("./db", () => ({
+  deleteQuestionnaireResponse: vi.fn(),
+  deleteQuestionnaireResponses: vi.fn(),
+}));
 
 function caller(user: { id: number; role: string } | null) {
   return appRouter.createCaller({
@@ -66,6 +70,97 @@ describe("管理员删除单份答卷", () => {
         caller({ id: 41, role: "admin" }).response.delete({
           questionnaireId: 12,
           responseId: 23,
+        })
+      ).rejects.toMatchObject({ code });
+    }
+  );
+});
+
+describe("批量删除答卷接口", () => {
+  it("一次调用传递全部 ID 与当前管理员，不能伪造管理员身份", async () => {
+    vi.mocked(db.deleteQuestionnaireResponses).mockResolvedValue({
+      success: true,
+      responseIds: [23, 24],
+      deletedCount: 2,
+      releasedQuota: 2,
+    } as any);
+    await expect(
+      caller({ id: 41, role: "admin" }).response.deleteBatch({
+        questionnaireId: 12,
+        responseIds: [23, 24],
+        creatorId: 999,
+      } as any)
+    ).resolves.toMatchObject({ deletedCount: 2, releasedQuota: 2 });
+    expect(db.deleteQuestionnaireResponses).toHaveBeenCalledOnce();
+    expect(db.deleteQuestionnaireResponses).toHaveBeenCalledWith(
+      12,
+      [23, 24],
+      41
+    );
+    expect(db.deleteQuestionnaireResponse).not.toHaveBeenCalled();
+  });
+
+  it.each([null, { id: 41, role: "user" }])(
+    "非管理员不能批量删除：%j",
+    async user => {
+      await expect(
+        caller(user).response.deleteBatch({
+          questionnaireId: 12,
+          responseIds: [23, 24],
+        })
+      ).rejects.toMatchObject({ code: "FORBIDDEN" });
+      expect(db.deleteQuestionnaireResponses).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each([
+    { questionnaireId: 0, responseIds: [1] },
+    { questionnaireId: 1, responseIds: [] },
+    { questionnaireId: 1, responseIds: [1, 1] },
+    { questionnaireId: 1, responseIds: [1, -2] },
+    { questionnaireId: 1, responseIds: [0] },
+    { questionnaireId: 1, responseIds: [1.5] },
+  ])("整批拒绝空选、重复或非法 ID：%j", async input => {
+    await expect(
+      caller({ id: 41, role: "admin" }).response.deleteBatch(input)
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(db.deleteQuestionnaireResponses).not.toHaveBeenCalled();
+  });
+
+  it("接受批次上限，超过上限不触发删除", async () => {
+    const ids = Array.from(
+      { length: MAX_RESPONSE_DELETE_BATCH },
+      (_, index) => index + 1
+    );
+    vi.mocked(db.deleteQuestionnaireResponses).mockResolvedValue({
+      success: true,
+      deletedCount: ids.length,
+    } as any);
+    await caller({ id: 41, role: "admin" }).response.deleteBatch({
+      questionnaireId: 12,
+      responseIds: ids,
+    });
+    expect(db.deleteQuestionnaireResponses).toHaveBeenCalledWith(12, ids, 41);
+    vi.mocked(db.deleteQuestionnaireResponses).mockClear();
+    await expect(
+      caller({ id: 41, role: "admin" }).response.deleteBatch({
+        questionnaireId: 12,
+        responseIds: [...ids, MAX_RESPONSE_DELETE_BATCH + 1],
+      })
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(db.deleteQuestionnaireResponses).not.toHaveBeenCalled();
+  });
+
+  it.each(["FORBIDDEN", "NOT_FOUND", "INTERNAL_SERVER_ERROR"] as const)(
+    "整批失败不误报成功：%s",
+    async code => {
+      vi.mocked(db.deleteQuestionnaireResponses).mockRejectedValue(
+        new TRPCError({ code })
+      );
+      await expect(
+        caller({ id: 41, role: "admin" }).response.deleteBatch({
+          questionnaireId: 12,
+          responseIds: [23, 24],
         })
       ).rejects.toMatchObject({ code });
     }

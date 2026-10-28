@@ -10,6 +10,8 @@ import * as db from "./db";
 import { TRPCError } from "@trpc/server";
 import { deriveGroupLabel } from "@shared/audioGroupLabels";
 import { readSubQuestionnairePlan } from "@shared/subQuestionnaires";
+import { responseDeletionIdsSchema } from "@shared/responseDeletion";
+import { dimensionOrderSchema } from "@shared/dimensionOrder";
 import { evaluationAnswerSchema, getScoringConfig, scoringConfigSchema } from "@shared/scoring";
 import { validatePublicEvaluationAnswers } from "./evaluationAnswers";
 import { aggregateAudioEvaluations } from "@shared/scoringAnalytics";
@@ -1009,6 +1011,10 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
    * Evaluation dimension management
    */
   dimension: router({
+    reorder: adminProcedure
+      .input(dimensionOrderSchema)
+      .mutation(({ input, ctx }) => db.reorderEvaluationDimensions(input, ctx.user.id)),
+
     create: adminProcedure
       .input(z.object({
         questionnaireId: z.number(),
@@ -1146,6 +1152,10 @@ Generate 5-8 questions total. Ensure they are relevant to the audio content and 
    * Response and answer management
    */
   response: router({
+    deleteBatch: adminProcedure
+      .input(z.object({ questionnaireId: z.number().int().positive(), responseIds: responseDeletionIdsSchema }))
+      .mutation(({ input, ctx }) => db.deleteQuestionnaireResponses(input.questionnaireId, input.responseIds, ctx.user.id)),
+
     delete: adminProcedure
       .input(z.object({ questionnaireId: z.number().int().positive(), responseId: z.number().int().positive() }))
       .mutation(({ input, ctx }) => db.deleteQuestionnaireResponse(input.questionnaireId, input.responseId, ctx.user.id)),

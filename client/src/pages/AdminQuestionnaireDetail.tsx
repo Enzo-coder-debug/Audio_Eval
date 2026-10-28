@@ -5,7 +5,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { GroupLabelPicker } from "@/components/GroupLabelPicker";
 import { SubQuestionnaireDistribution } from "@/components/SubQuestionnaireDistribution";
-import { DeleteResponseButton } from "@/components/DeleteResponseButton";
+import { DeleteResponseButton, DeleteResponsesButton } from "@/components/DeleteResponseButton";
+import { MAX_RESPONSE_DELETE_BATCH } from "@shared/responseDeletion";
 import { summarizeResponses } from "@shared/responseStats";
 import { ScoringConfigEditor, ScoringConfigSummary } from "@/components/ScoringConfigEditor";
 import { formatAudioEvaluation, getScoringConfig, scoringConfigSchema, type ScoringConfig } from "@shared/scoring";
@@ -17,13 +18,16 @@ import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { ArrowLeft, Plus, Edit2, Trash2, Music, Send, Copy, Globe, BarChart3, Download } from "lucide-react";
+import { ArrowLeft, ArrowUp, ArrowDown, Plus, Edit2, Trash2, Music, Send, Copy, Globe, BarChart3, Download } from "lucide-react";
 import { trpc } from "@/lib/trpc";
 import { formatResponsePairAudioLabel } from "@/lib/responseAudioLabels";
 import { toast } from "sonner";
 import * as XLSX from "xlsx";
 import { getEmotionCategories, type EmotionCategory } from "@shared/evaluationDimensions";
 import { deriveGroupLabel } from "@shared/audioGroupLabels";
+import { moveDimension } from "@shared/dimensionOrder";
+import { AudioSelectionToolbar, AudioPagination, type AudioFilters } from "@/components/AudioSelectionToolbar";
+import { filterAudios, getAudioModelOptions, getAudioPage, updateAudioSelection } from "@/lib/audioSelection";
 
 // 读取音频文件为上传所需格式(与 AdminDashboard 一致)。
 async function readAudioForUpload(file: File) {
@@ -75,6 +79,7 @@ export default function AdminQuestionnaireDetail() {
   const [isSampleDialogOpen, setIsSampleDialogOpen] = useState(false);
   const [sampleSizeDraft, setSampleSizeDraft] = useState("");
   const [expandedResponseId, setExpandedResponseId] = useState<number | null>(null);
+  const [selectedResponseIds, setSelectedResponseIds] = useState<number[]>([]);
 
   // 音频管理:待新增音频列表(支持一次选多个,填好模型名后一次性上传+配对)
   // 每一项 = 一个文件 + 对应模型名
@@ -82,13 +87,19 @@ export default function AdminQuestionnaireDetail() {
   const audioInputRef = React.useRef<HTMLInputElement>(null);
   const audioFolderInputRef = React.useRef<HTMLInputElement>(null);
   const [selectedAudioIds, setSelectedAudioIds] = useState<number[]>([]);
+  const [audioFilters, setAudioFilters] = useState<AudioFilters>({ model: "all", query: "", selectedOnly: false });
+  const [audioPage, setAudioPage] = useState(1);
   const [isBulkGroupDialogOpen, setIsBulkGroupDialogOpen] = useState(false);
   const [bulkGroupLabel, setBulkGroupLabel] = useState("");
   // 组别草稿:音频 id -> 组别输入值(在音频管理表格里就地编辑,保存后调 updateGroupLabels)
   const [groupLabelDraft, setGroupLabelDraft] = useState<Record<number, string>>({});
 
   React.useEffect(() => {
+    setSelectedResponseIds([]);
+    setExpandedResponseId(null);
     setSelectedAudioIds([]);
+    setAudioFilters({ model: "all", query: "", selectedOnly: false });
+    setAudioPage(1);
     setGroupLabelDraft({});
     setIsBulkGroupDialogOpen(false);
     setBulkGroupLabel("");
@@ -128,6 +139,34 @@ export default function AdminQuestionnaireDetail() {
   const { data: dimensions, refetch: refetchDimensions } = 
     trpc.dimension.list.useQuery({ questionnaireId });
 
+  const utils = trpc.useUtils();
+  const { mutate: reorderDimensions, isPending: isReorderingDimensions } = trpc.dimension.reorder.useMutation({
+    onSuccess: async (result, input) => {
+      const positions = new Map(result.orderedDimensionIds.map((dimensionId, index) => [dimensionId, index]));
+      utils.dimension.list.setData({ questionnaireId: input.questionnaireId }, current => current?.map(dimension => ({
+        ...dimension,
+        orderIndex: positions.get(dimension.id) ?? dimension.orderIndex,
+      })).sort((left, right) => left.orderIndex - right.orderIndex || left.id - right.id));
+      toast.success("测评维度顺序已保存");
+      const refreshes = await Promise.allSettled([
+        utils.dimension.list.invalidate({ questionnaireId: input.questionnaireId }),
+        utils.questionnaire.getByShareToken.invalidate(),
+      ]);
+      if (refreshes.some(refresh => refresh.status === "rejected")) toast.warning("顺序已保存，页面刷新失败，请手动刷新");
+    },
+    onError: async (error, input) => {
+      toast.error(error.message || "排序保存失败，请重试");
+      await utils.dimension.list.invalidate({ questionnaireId: input.questionnaireId }).catch(() => undefined);
+    },
+  });
+  const handleMoveDimension = (dimensionId: number, direction: -1 | 1) => {
+    if (!dimensions || isReorderingDimensions) return;
+    const expectedDimensionIds = dimensions.map(dimension => dimension.id);
+    const orderedDimensionIds = moveDimension(expectedDimensionIds, dimensionId, direction);
+    if (orderedDimensionIds.every((value, index) => value === expectedDimensionIds[index])) return;
+    reorderDimensions({ questionnaireId, expectedDimensionIds, orderedDimensionIds });
+  };
+
   // 音频管理:该问卷当前音频列表 + 是否已有作答(用于风险提示)
   const { data: audioData, refetch: refetchAudios } =
     trpc.audio.listByQuestionnaire.useQuery({ questionnaireId });
@@ -142,6 +181,34 @@ export default function AdminQuestionnaireDetail() {
   const emptyGroupAudios = questionnaireAudios.filter(audio => !audio.groupLabel?.trim());
   const selectedAudioIdSet = new Set(selectedAudioIds);
   const selectedAudios = questionnaireAudios.filter(audio => selectedAudioIdSet.has(audio.id));
+  const audioModelOptions = React.useMemo(() => getAudioModelOptions(audioData?.audios ?? []), [audioData?.audios]);
+  const matchingAudios = React.useMemo(() => filterAudios(audioData?.audios ?? [], audioFilters, new Set(selectedAudioIds)), [audioData?.audios, audioFilters, selectedAudioIds]);
+  const matchingAudioIds = matchingAudios.map(audio => audio.id);
+  const selectedMatchingCount = matchingAudios.filter(audio => selectedAudioIdSet.has(audio.id)).length;
+  const hiddenSelectedAudioCount = selectedAudios.length - selectedMatchingCount;
+  const { currentPage: currentAudioPage, totalPages: totalAudioPages, pageAudios } = getAudioPage(matchingAudios, audioPage);
+  const handleAudioFiltersChange = (filters: AudioFilters) => {
+    setAudioFilters(filters);
+    setAudioPage(1);
+  };
+  const handleSelectMatchingAudios = (action: "select" | "deselect") => {
+    setSelectedAudioIds(current => updateAudioSelection(current, matchingAudioIds, action));
+  };
+  React.useEffect(() => {
+    if (!audioData) return;
+    const availableIds = new Set(audioData.audios.map(audio => audio.id));
+    setSelectedAudioIds(current => {
+      const remaining = current.filter(audioId => availableIds.has(audioId));
+      return remaining.length === current.length ? current : remaining;
+    });
+    setGroupLabelDraft(current => {
+      const remaining = Object.fromEntries(Object.entries(current).filter(([audioId]) => availableIds.has(Number(audioId))));
+      return Object.keys(remaining).length === Object.keys(current).length ? current : remaining;
+    });
+  }, [audioData]);
+  React.useEffect(() => {
+    setAudioPage(currentAudioPage);
+  }, [currentAudioPage]);
   const hasUnsavedGroupLabels = questionnaireAudios.some(audio =>
     (groupLabelDraft[audio.id] ?? audio.groupLabel ?? "").trim() !== (audio.groupLabel ?? "")
   );
@@ -203,6 +270,25 @@ export default function AdminQuestionnaireDetail() {
   const { data: responsesData, refetch: refetchResponses } = 
     trpc.response.listQuestionnaire.useQuery({ questionnaireId });
   const responses = responsesData?.responses;
+  const selectedResponseIdSet = new Set(selectedResponseIds);
+  const selectedResponses = (responses ?? []).filter(response => selectedResponseIdSet.has(response.id));
+  const selectableResponseIds = (responses ?? []).slice(0, MAX_RESPONSE_DELETE_BATCH).map(response => response.id);
+  const allBatchResponsesSelected = selectableResponseIds.length > 0 && selectableResponseIds.every(responseId => selectedResponseIdSet.has(responseId));
+  const handleResponseSelection = (responseId: number, checked: boolean) => {
+    setSelectedResponseIds(current => {
+      if (!checked) return current.filter(selectedId => selectedId !== responseId);
+      if (current.includes(responseId) || current.length >= MAX_RESPONSE_DELETE_BATCH) return current;
+      return [...current, responseId];
+    });
+  };
+  React.useEffect(() => {
+    if (!responses) return;
+    const availableIds = new Set(responses.map(response => response.id));
+    setSelectedResponseIds(current => {
+      const remaining = current.filter(responseId => availableIds.has(responseId));
+      return remaining.length === current.length ? current : remaining;
+    });
+  }, [responses]);
   const pairsInfo = responsesData?.pairsInfo;
 
   // Auto-refresh every 5 seconds
@@ -401,7 +487,7 @@ export default function AdminQuestionnaireDetail() {
       createDimension({
         questionnaireId,
         ...payload,
-        orderIndex: (dimensions?.length || 0) + 1,
+        orderIndex: Math.max(-1, ...(dimensions ?? []).map(dimension => dimension.orderIndex)) + 1,
       });
     }
   };
@@ -571,7 +657,8 @@ export default function AdminQuestionnaireDetail() {
       toast.error("请先勾选要移除的音频");
       return;
     }
-    if (confirm(`确定移除选中的 ${selectedAudios.length} 个音频吗？移除后请重新生成盲测配对。`)) {
+    const modelSummary = getAudioModelOptions(selectedAudios).map(model => `${model.label}：${model.count} 个`).join("；");
+    if (confirm(`确定移除选中的 ${selectedAudios.length} 个音频吗？\n${modelSummary}${hiddenSelectedAudioCount > 0 ? `\n其中 ${hiddenSelectedAudioCount} 个不在当前筛选结果中。` : ""}\n移除后请重新生成盲测配对。`)) {
       removeAudio({ questionnaireId, audioFileIds: selectedAudios.map(audio => audio.id) });
     }
   };
@@ -958,7 +1045,7 @@ export default function AdminQuestionnaireDetail() {
             <div className="flex items-center justify-between">
               <div>
                 <h2 className="text-2xl font-bold text-slate-900">测评维度</h2>
-                <p className="text-slate-600 mt-1">定义问卷的评分维度</p>
+                <p className="text-slate-600 mt-1">使用上移／下移调整展示顺序，点击即保存；答题页刷新后生效，不影响评分规则和历史答案。</p>
               </div>
               <div className="flex items-center gap-2">
                 <Dialog open={isStandardDialogOpen} onOpenChange={setIsStandardDialogOpen}>
@@ -1240,7 +1327,7 @@ export default function AdminQuestionnaireDetail() {
               </div>
             </div>
 
-            {(questionnaire.status === "published" || (responses?.length ?? 0) > 0) && <p className="text-sm text-amber-700">评分维度已锁定。无答卷时可取消发布后修改；已有答卷请复制问卷后配置新规则。</p>}
+            {(questionnaire.status === "published" || (responses?.length ?? 0) > 0) && <p className="text-sm text-amber-700">评分规则已锁定，仍可调整展示顺序。无答卷时可取消发布后修改规则；已有答卷请复制问卷后配置新规则。</p>}
             {/* Dimensions List */}
             {!dimensions || dimensions.length === 0 ? (
               <Card>
@@ -1259,12 +1346,13 @@ export default function AdminQuestionnaireDetail() {
               </Card>
             ) : (
               <div className="grid gap-4">
-                {dimensions.map((dimension: any) => (
+                {dimensions.map((dimension: any, dimensionIndex: number) => (
                   <Card key={dimension.id}>
                     <CardHeader className="pb-3">
-                      <div className="flex items-start justify-between">
-                        <div>
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="min-w-0">
                           <CardTitle className="text-lg">
+                            <span className="mr-2 text-slate-500">{dimensionIndex + 1}.</span>
                             {dimension.dimensionName}
                             <span className="ml-2 inline-block rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium">{getScoringConfig(dimension).mode === "numeric" ? "量化打分 · A/B 独立" : getScoringConfig(dimension).mode === "text" ? "开放文本" : "GSB"}</span>
                             {dimension.dimensionType === "emotion_accuracy" && (
@@ -1282,7 +1370,25 @@ export default function AdminQuestionnaireDetail() {
                             </CardDescription>
                           )}
                         </div>
-                        <div className="flex gap-2">
+                        <div className="flex shrink-0 gap-2">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            aria-label={`上移维度 ${dimension.dimensionName}`}
+                            disabled={isReorderingDimensions || isCreatingDimension || isUpdatingDimension || dimensionIndex === 0}
+                            onClick={() => handleMoveDimension(dimension.id, -1)}
+                          >
+                            <ArrowUp className="mr-1 w-4 h-4" />上移
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            aria-label={`下移维度 ${dimension.dimensionName}`}
+                            disabled={isReorderingDimensions || isCreatingDimension || isUpdatingDimension || dimensionIndex === dimensions.length - 1}
+                            onClick={() => handleMoveDimension(dimension.id, 1)}
+                          >
+                            <ArrowDown className="mr-1 w-4 h-4" />下移
+                          </Button>
                           <Button
                             size="sm"
                             variant="ghost"
@@ -1455,6 +1561,19 @@ export default function AdminQuestionnaireDetail() {
             ) : (
               <Card>
                 <CardContent className="pt-6">
+                  <AudioSelectionToolbar
+                    filters={audioFilters}
+                    onFiltersChange={handleAudioFiltersChange}
+                    modelOptions={audioModelOptions}
+                    totalCount={questionnaireAudios.length}
+                    matchingCount={matchingAudios.length}
+                    selectedCount={selectedAudios.length}
+                    selectedMatchingCount={selectedMatchingCount}
+                    disabled={isEditingGroups || isGeneratingPairs || isRemovingAudio}
+                    onSelectMatches={() => handleSelectMatchingAudios("select")}
+                    onDeselectMatches={() => handleSelectMatchingAudios("deselect")}
+                    onClearSelection={() => setSelectedAudioIds([])}
+                  />
                   <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                     <span className="text-sm text-slate-600">
                       已勾选 {selectedAudios.length} / {questionnaireAudios.length} 个音频
@@ -1508,6 +1627,7 @@ export default function AdminQuestionnaireDetail() {
                   {hasUnsavedGroupLabels && (
                     <p className="mb-3 text-sm text-amber-700">有未保存的组别修改，请先点击「保存组别」，再生成盲测配对。</p>
                   )}
+                  <p className="mb-3 text-xs text-slate-500">批量编辑组别／批量移除作用于全部已勾选音频（含其他页和筛选外音频）；保存组别、补齐空组别和生成配对仍作用于整个问卷，不受筛选限制。</p>
                   <Dialog
                     open={isBulkGroupDialogOpen}
                     onOpenChange={open => { if (!isSavingGroups) setIsBulkGroupDialogOpen(open); }}
@@ -1517,9 +1637,11 @@ export default function AdminQuestionnaireDetail() {
                         <DialogTitle>批量编辑组别</DialogTitle>
                         <DialogDescription>
                           仅修改选中的 {selectedAudios.length} 个音频，未选音频及其未保存的修改保持不变。
+                          {hiddenSelectedAudioCount > 0 && ` 包含当前筛选外的 ${hiddenSelectedAudioCount} 个已选音频。`}
                         </DialogDescription>
                       </DialogHeader>
                       <form className="space-y-4" onSubmit={event => { event.preventDefault(); if (!isSavingGroups) handleSaveBulkGroupLabels(); }}>
+                        <p className="max-h-28 overflow-y-auto text-sm text-slate-600">{getAudioModelOptions(selectedAudios).map(model => `${model.label}：${model.count} 个`).join("；")}</p>
                         <div className="space-y-2">
                           <Label htmlFor="bulk-group-label">统一设置组别</Label>
                           <Input
@@ -1544,15 +1666,16 @@ export default function AdminQuestionnaireDetail() {
                       </form>
                     </DialogContent>
                   </Dialog>
+                  <AudioPagination page={currentAudioPage} totalPages={totalAudioPages} pageCount={pageAudios.length} matchingCount={matchingAudios.length} onPageChange={setAudioPage} />
                   <Table>
                     <TableHeader>
                       <TableRow>
                         <TableHead className="w-10">
                           <Checkbox
-                            aria-label="全选音频"
-                            checked={selectedAudios.length === questionnaireAudios.length ? true : selectedAudios.length > 0 ? "indeterminate" : false}
-                            disabled={isEditingGroups || isGeneratingPairs || isRemovingAudio}
-                            onCheckedChange={checked => setSelectedAudioIds(checked === true ? questionnaireAudios.map(audio => audio.id) : [])}
+                            aria-label="全选当前筛选结果（包含所有分页）"
+                            checked={matchingAudios.length > 0 && selectedMatchingCount === matchingAudios.length ? true : selectedMatchingCount > 0 ? "indeterminate" : false}
+                            disabled={isEditingGroups || isGeneratingPairs || isRemovingAudio || matchingAudios.length === 0}
+                            onCheckedChange={checked => handleSelectMatchingAudios(checked === true ? "select" : "deselect")}
                           />
                         </TableHead>
                         <TableHead>文件名</TableHead>
@@ -1563,11 +1686,12 @@ export default function AdminQuestionnaireDetail() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {questionnaireAudios.map((audio: any) => (
+                      {pageAudios.length === 0 && <TableRow><TableCell colSpan={6} className="py-10 text-center text-slate-500">没有匹配的音频，请调整模型、关键词或取消「仅看已选」。</TableCell></TableRow>}
+                      {pageAudios.map((audio: any) => (
                         <TableRow key={audio.id}>
                           <TableCell>
                             <Checkbox
-                              aria-label={`选择音频 ${audio.fileName}`}
+                              aria-label={`选择音频 ${audio.fileName}（${audio.modelName || "未填写模型名称"}，#${audio.id}）`}
                               checked={selectedAudioIdSet.has(audio.id)}
                               disabled={isEditingGroups || isGeneratingPairs || isRemovingAudio}
                               onCheckedChange={() => toggleAudioSelect(audio.id)}
@@ -1595,7 +1719,7 @@ export default function AdminQuestionnaireDetail() {
                           </TableCell>
                           <TableCell>
                             {audio.fileUrl ? (
-                              <audio controls src={audio.fileUrl} className="h-8" />
+                              <audio controls preload="none" src={audio.fileUrl} className="h-8" />
                             ) : (
                               "-"
                             )}
@@ -1626,6 +1750,7 @@ export default function AdminQuestionnaireDetail() {
                       ))}
                     </TableBody>
                   </Table>
+                  <AudioPagination page={currentAudioPage} totalPages={totalAudioPages} pageCount={pageAudios.length} matchingCount={matchingAudios.length} onPageChange={setAudioPage} />
                   <p className="text-xs text-slate-500 mt-3">
                     提示：为同一段文案下的不同模型音频填相同「组别」，保存组别后点击「生成盲测配对」，同组内不同模型会两两配对。组别为空的音频不参与配对。
                   </p>
@@ -1679,18 +1804,31 @@ export default function AdminQuestionnaireDetail() {
 
           {/* Responses Tab */}
           <TabsContent value="responses" className="space-y-6">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <h2 className="text-2xl font-bold text-slate-900">答卷详情</h2>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleExportExcel}
-                disabled={!responses || responses.length === 0}
-              >
-                <Download className="w-4 h-4 mr-2" />
-                导出 Excel
-              </Button>
+              <div className="flex flex-wrap items-center gap-2">
+                <DeleteResponsesButton
+                  questionnaireId={questionnaireId}
+                  responses={selectedResponses}
+                  onDeleted={deletedIds => {
+                    const deleted = new Set(deletedIds);
+                    setSelectedResponseIds(current => current.filter(responseId => !deleted.has(responseId)));
+                    setExpandedResponseId(current => current != null && deleted.has(current) ? null : current);
+                  }}
+                />
+                <Button variant="outline" size="sm" disabled={selectedResponseIds.length === 0} onClick={() => setSelectedResponseIds([])}>取消选择</Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleExportExcel}
+                  disabled={!responses || responses.length === 0}
+                >
+                  <Download className="w-4 h-4 mr-2" />
+                  导出 Excel
+                </Button>
+              </div>
             </div>
+            <p className="text-sm text-slate-600">已选择 {selectedResponses.length} 份答卷；每批最多 {MAX_RESPONSE_DELETE_BATCH} 份。{(responses?.length ?? 0) > MAX_RESPONSE_DELETE_BATCH ? `表头勾选将选择列表前 ${MAX_RESPONSE_DELETE_BATCH} 份，其余可分批删除。` : "勾选表头可全选或取消全选。"}删除不可撤销。</p>
 
             {!responses || responses.length === 0 ? (
               <Card>
@@ -1704,6 +1842,13 @@ export default function AdminQuestionnaireDetail() {
                   <Table>
                     <TableHeader>
                       <TableRow>
+                        <TableHead className="w-10">
+                          <Checkbox
+                            aria-label={(responses?.length ?? 0) > MAX_RESPONSE_DELETE_BATCH ? `选择前 ${MAX_RESPONSE_DELETE_BATCH} 份答卷` : "全选答卷"}
+                            checked={allBatchResponsesSelected ? true : selectedResponses.length > 0 ? "indeterminate" : false}
+                            onCheckedChange={checked => setSelectedResponseIds(checked === true ? selectableResponseIds : [])}
+                          />
+                        </TableHead>
                         <TableHead>访客名称</TableHead>
                         <TableHead>访客 IP</TableHead>
                         <TableHead>状态</TableHead>
@@ -1717,6 +1862,14 @@ export default function AdminQuestionnaireDetail() {
                       {responses.map((response: any) => (
                         <React.Fragment key={response.id}>
                         <TableRow>
+                          <TableCell>
+                            <Checkbox
+                              aria-label={`选择 ${response.visitorName || "匿名"} 的答卷 #${response.id}`}
+                              checked={selectedResponseIdSet.has(response.id)}
+                              disabled={!selectedResponseIdSet.has(response.id) && selectedResponses.length >= MAX_RESPONSE_DELETE_BATCH}
+                              onCheckedChange={checked => handleResponseSelection(response.id, checked === true)}
+                            />
+                          </TableCell>
                           <TableCell>{response.visitorName || "匿名"}{response.subQuestionnaireIndex != null && <p className="text-xs text-blue-600">子问卷 {response.subQuestionnaireIndex}</p>}</TableCell>
                        <TableCell className="font-mono text-sm">{response.visitorIp}</TableCell>
                           <TableCell>
@@ -1762,7 +1915,7 @@ export default function AdminQuestionnaireDetail() {
                         </TableRow>
                         {expandedResponseId === response.id && (
                           <TableRow>
-                            <TableCell colSpan={7} className="bg-slate-50">
+                            <TableCell colSpan={8} className="bg-slate-50">
                               {!response.answers || response.answers.length === 0 ? (
                                 <p className="text-sm text-slate-500 py-2">该答卷暂无作答记录</p>
                               ) : (
